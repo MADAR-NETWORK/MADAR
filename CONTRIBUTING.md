@@ -20,6 +20,8 @@ cargo build --locked --workspace
 cargo test --locked --workspace
 ```
 
+> On Linux and macOS, add `--exclude madar-app --exclude madar-setup`: those two crates are the Windows desktop app and installer and only build on Windows.
+
 Optional: install the local git hooks (including the secret scanner):
 
 ```bash

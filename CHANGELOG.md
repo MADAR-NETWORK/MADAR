@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- Updated `wasmtime` from 36.0.15 to 36.0.16 (RUSTSEC-2026-0316) and replaced the yanked `yoke-derive` 0.8.3 with 0.8.4.
+
+### Fixed
+- CI: Linux tests skip the Windows-only desktop app and installer; the build-environment check no longer requires a pre-filled offline cache.
+
 ### Added
 - First public release of the source code.
 - `LICENSE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `GETTING_STARTED.md`, `ROADMAP.md`, `ARCHITECTURE.md`, and issue / pull request templates.

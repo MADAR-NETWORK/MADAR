@@ -41,6 +41,8 @@ To run the test suite:
 cargo test --locked --workspace
 ```
 
+> On Linux and macOS, add `--exclude madar-app --exclude madar-setup`: those two crates are the Windows desktop app and installer and only build on Windows.
+
 ## 3. Run a full node on the public testnet
 
 The easiest way is the launcher script, which applies sensible defaults (bootnodes, pruning, safe RPC, limited peers):

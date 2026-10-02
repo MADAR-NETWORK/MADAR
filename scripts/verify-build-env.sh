@@ -42,7 +42,7 @@ done
 if grep -rnE '^\[(patch|replace)' --include=Cargo.toml . 2>/dev/null | grep -v '/target/'; then bad "[patch]/[replace] found in Cargo.toml (silently replaces a dependency source)"; else ok "no [patch]/[replace]"; fi
 
 # 5) The lock file is consistent with Cargo.toml (no update needed) — --locked fails if it would need changes.
-if cargo metadata --locked --offline --format-version 1 >/dev/null 2>/tmp/verify-build-env.err; then ok "Cargo.lock consistent (--locked)"; else bad "Cargo.lock inconsistent with Cargo.toml: $(tail -2 /tmp/verify-build-env.err)"; fi
+if cargo metadata --locked --format-version 1 >/dev/null 2>/tmp/verify-build-env.err; then ok "Cargo.lock consistent (--locked)"; else bad "Cargo.lock inconsistent with Cargo.toml: $(tail -2 /tmp/verify-build-env.err)"; fi
 
 
 # 6) The lock file is committed to Git with no pending changes.

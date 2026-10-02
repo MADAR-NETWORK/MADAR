@@ -62,7 +62,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libclang-dev clang libssl-dev pkg-config
       - name: toolchain (pinned by rust-toolchain.toml)
         run: rustup show active-toolchain
-      - run: cargo test --locked --workspace
+      # madar-app and madar-setup are the Windows desktop app and installer (Windows-only APIs); they are tested in the Windows job.
+      - run: cargo test --locked --workspace --exclude madar-app --exclude madar-setup
 
   test-windows:
     name: tests (windows, workspace without node)
