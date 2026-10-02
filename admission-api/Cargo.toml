@@ -1,0 +1,21 @@
+[package]
+name = "madar-admission-api"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "MADAR Network — read-only, versioned Runtime API for membership/admission status (tools and the dashboard read chain state through it instead of decoding storage). No storage, no rules."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+parity-scale-codec = { version = "3.6.12", features = ["derive"], default-features = false }
+scale-info = { version = "2.11.3", features = ["derive"], default-features = false }
+sp-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+default = ["std"]
+std = ["parity-scale-codec/std", "scale-info/std", "sp-api/std", "sp-core/std"]

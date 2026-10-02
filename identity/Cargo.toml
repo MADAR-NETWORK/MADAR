@@ -1,0 +1,23 @@
+[package]
+name = "madar-identity"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "MADAR Network — Identity/Cryptography primitives (AccountId/AccountPublic/Signature). No custom crypto: consumes sp-core/sp-runtime directly via MultiSigner/MultiSignature."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+
+[dev-dependencies]
+hex = "0.4.3"
+madar-protocol = { path = "../protocol" }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+default = ["std"]
+std = ["sp-core/std", "sp-runtime/std"]

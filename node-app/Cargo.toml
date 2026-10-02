@@ -1,0 +1,23 @@
+[package]
+name = "madar-app"
+version = "2.0.6"
+edition = "2021"
+description = "MADAR Node 2.0 for Windows: local account + status page, tray icon, gentle full node, signed updates."
+license = "Apache-2.0"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "madar-app"
+path = "src/main.rs"
+
+# Release tool (not shipped): creates the update-signing key and signs latest.json.
+[[bin]]
+name = "madar-release-sign"
+path = "src/bin/release_sign.rs"
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+ed25519-dalek = "2.2"
+getrandom = "0.2"

@@ -1,0 +1,33 @@
+/target
+**/target
+.DS_Store
+*.log
+.claude/
+
+# D35 — encrypted release-signing keys never enter Git (see
+# scripts/check-no-secrets.sh,
+# which rejects .enc files even if this exclusion is bypassed by mistake).
+*.enc
+
+# Dashboard runtime artifacts — local to each run, never committed.
+dashboard/config.json
+dashboard/*.jsonl
+dashboard/dashboard-security-scan.json
+# Dashboard login data — a password hash (not the password itself), local only.
+dashboard/credentials.json
+# Release build outputs and the generated SBOM (scripts/build-release.sh)
+dist/
+*.cdx.json
+
+# Local secrets and archives — never committed (security review 2026-09-27)
+/node-key
+*.node-key
+madar-src.tar
+*.tar
+
+# Local chain data and backups (never commit)
+/data/
+/data-old-chain-*/
+/madar-spec-old-*.json
+dashboard/*.lastlogin
+dashboard/committee-requests/

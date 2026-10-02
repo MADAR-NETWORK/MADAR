@@ -1,0 +1,12 @@
+# The build environment is pinned exactly (review #25): one known rustc version instead of the moving `stable`, so every machine/CI builds with the same compiler.
+# This is the version all tests (unit + live) passed with. Upgrading it is a deliberate decision: change the number here and in the internal design document,
+# then rerun the full test suite (including live tests) — no silent upgrades.
+#
+# `wasm32v1-none`: the approved WASM target for building the Runtime (Polkadot SDK recommendation for Rust >= 1.84: MVP instruction set only, without the modern WASM features
+# that `wasm32-unknown-unknown` enables automatically and that would produce a Runtime not every executor runs with the same result); `substrate-wasm-builder` prefers it when present.
+# `wasm32-unknown-unknown` remains for tools that explicitly require it.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32v1-none", "wasm32-unknown-unknown"]

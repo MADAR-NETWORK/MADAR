@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<title>MADAR Node</title>
+<style>
+:root{
+  --bg:#F4F6FB; --surface:#FFFFFF; --surface-2:#F0F3FA; --border:#E3E8F2; --ink:#0E1528; --mute:#5B6784;
+  --brand-a:#0FB5A6; --brand-b:#2F5BEA; --accent:#FFC53D;
+  --good:#16A34A; --warn:#D97706; --bad:#DC2626; --idle:#94A3B8;
+  --shadow:0 1px 2px rgba(14,21,40,.05),0 8px 24px rgba(14,21,40,.06);
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0B1020; --surface:#121935; --surface-2:#18213F; --border:#243052; --ink:#E7ECF7; --mute:#8D98B5;
+  --good:#22C55E; --warn:#F5A524; --bad:#EF4444; --idle:#64748B;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.35);
+}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.6 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,Roboto,Tahoma,sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:680px;margin:0 auto;padding:20px 16px 48px}
+
+/* header */
+header{display:flex;align-items:center;gap:12px;margin:4px 0 22px}
+header img{width:44px;height:44px;border-radius:50%;flex:none;box-shadow:0 0 18px rgba(29,78,216,.35)}
+.brand{flex:1;min-width:0}
+.brand h1{font-size:19px;margin:0;letter-spacing:.2px}
+.brand p{margin:0;color:var(--mute);font-size:13px}
+.lang{appearance:none;background:var(--surface);color:var(--ink);border:1px solid var(--border);border-radius:10px;padding:7px 30px 7px 12px;font:inherit;font-size:13px;cursor:pointer;
+  background-image:linear-gradient(45deg,transparent 50%,var(--mute) 50%),linear-gradient(135deg,var(--mute) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 55%,calc(100% - 10px) 55%;background-size:5px 5px;background-repeat:no-repeat}
+
+/* update bar */
+.update-bar{position:sticky;top:0;z-index:5;background:linear-gradient(90deg,#1d4fd8,#3d7bff);color:#fff;padding:12px 16px;box-shadow:var(--shadow)}
+.update-bar .in{max-width:680px;margin:0 auto;display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.update-bar b{font-size:15px}
+.update-bar .sub{opacity:.92;font-size:13px}
+.update-bar button{background:#fff;color:#1d4fd8;border:0;font-weight:700}
+
+/* cards */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:22px;margin-bottom:14px;box-shadow:var(--shadow)}
+.card h2{font-size:14px;margin:0 0 14px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+
+/* hero */
+.hero{display:grid;grid-template-columns:auto 1fr;gap:22px;align-items:center}
+.ring{position:relative;width:148px;height:148px}
+.ring svg{width:148px;height:148px;transform:rotate(-90deg)}
+.ring .track{stroke:var(--surface-2)}
+.ring .arc{stroke:var(--idle);transition:stroke-dashoffset .8s ease,stroke .3s}
+.ring .center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+.ring .big{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.ring .small{font-size:12px;color:var(--mute)}
+.ring .dot{width:14px;height:14px;border-radius:50%;background:var(--idle);box-shadow:0 0 0 6px color-mix(in srgb,var(--idle) 18%,transparent)}
+.hero .state{font-size:22px;font-weight:700;margin:0 0 4px}
+.hero .sentence{color:var(--mute);margin:0 0 10px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mute);background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:3px 10px}
+.s-running{--c:var(--good)} .s-catching_up,.s-connecting,.s-starting,.s-bootstrapping{--c:var(--warn)} .s-disconnected,.s-needs_repair{--c:var(--bad)} .s-stopped,.s-needs_account,.s-paused{--c:var(--idle)}
+.hero .arc{stroke:var(--c)} .hero .dot{background:var(--c);box-shadow:0 0 0 6px color-mix(in srgb,var(--c) 20%,transparent)}
+.s-running .dot{animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 11px color-mix(in srgb,var(--c) 6%,transparent)}}
+
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:20px}
+.stat{background:var(--surface-2);border-radius:12px;padding:10px 12px}
+.stat span{display:block;color:var(--mute);font-size:12px}
+.stat b{font-size:18px;font-variant-numeric:tabular-nums}
+
+/* forms */
+label.fld{display:block;font-weight:600;margin:14px 0 6px;font-size:14px}
+input[type=text],input[type=email]{width:100%;padding:11px 13px;font:inherit;border:1px solid var(--border);border-radius:11px;background:var(--surface-2);color:var(--ink);outline:none;transition:border-color .2s,box-shadow .2s}
+input:focus{border-color:var(--brand-b);box-shadow:0 0 0 3px color-mix(in srgb,var(--brand-b) 20%,transparent)}
+input[type=email]{direction:ltr}
+.hint{color:var(--mute);font-size:13px;margin:6px 0 0}
+.note{background:var(--surface-2);border-radius:12px;padding:10px 12px;margin-top:14px;font-size:13px;color:var(--mute)}
+.note b{color:var(--ink)}
+button{font:inherit;font-weight:600;padding:10px 18px;border-radius:11px;border:1px solid var(--border);background:var(--surface);color:var(--ink);cursor:pointer;transition:transform .05s,filter .2s}
+button:active{transform:translateY(1px)}
+button.primary{background:linear-gradient(135deg,var(--brand-a),var(--brand-b));border:0;color:#fff;margin-top:18px;width:100%;padding:12px}
+button.primary:disabled{filter:grayscale(.6) opacity(.55);cursor:default}
+button.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 35%,var(--border))}
+.err{color:var(--bad);min-height:1.4em;margin-top:8px;font-size:13px}
+
+dl{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;margin:0}
+dt{color:var(--mute)} dd{margin:0;overflow-wrap:anywhere}
+.lock{font-size:12px;color:var(--mute);font-weight:400;text-transform:none;letter-spacing:0}
+
+.row{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+.switch{position:relative;width:46px;height:26px;flex:none}
+.switch input{opacity:0;width:0;height:0}
+.switch span{position:absolute;inset:0;background:var(--surface-2);border:1px solid var(--border);border-radius:999px;transition:.2s;cursor:pointer}
+.switch span:before{content:"";position:absolute;width:20px;height:20px;top:2px;inset-inline-start:2px;background:#fff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:.2s}
+.switch input:checked+span{background:linear-gradient(135deg,var(--brand-a),var(--brand-b));border-color:transparent}
+.switch input:checked+span:before{transform:translateX(20px)}
+.setting b{display:block} .setting small{color:var(--mute)}
+
+footer{color:var(--mute);font-size:12px;text-align:center;margin-top:18px}
+.eta{font-size:13px;color:var(--warn);font-weight:600;margin:-4px 0 10px}
+.stats{grid-template-columns:repeat(auto-fit,minmax(96px,1fr))!important}
+.warns{margin-top:14px;display:grid;gap:8px}
+.warn{display:flex;gap:10px;align-items:flex-start;background:color-mix(in srgb,var(--warn) 12%,var(--surface));border:1px solid color-mix(in srgb,var(--warn) 35%,var(--border));border-radius:12px;padding:10px 12px;font-size:13px}
+.warn:before{content:"!";flex:none;width:20px;height:20px;border-radius:50%;background:var(--warn);color:#fff;font-weight:700;display:grid;place-items:center;font-size:12px}
+.repair{border-color:color-mix(in srgb,var(--bad) 45%,var(--border))}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.chart{background:var(--surface-2);border-radius:12px;padding:10px 12px}
+.chart .lbl{display:flex;justify-content:space-between;font-size:12px;color:var(--mute)}
+.chart .lbl b{color:var(--ink);font-size:14px}
+.chart svg{width:100%;height:54px;display:block;margin-top:6px}
+.welcome{text-align:center;padding:30px 26px}
+.welcome img{width:84px;height:84px;border-radius:22px;margin:0 auto 14px;display:block;box-shadow:0 10px 30px color-mix(in srgb,var(--brand-b) 35%,transparent)}
+.welcome h2{font-size:22px!important;color:var(--ink)!important;text-transform:none!important;letter-spacing:0!important;margin:0 0 8px!important}
+.welcome p{color:var(--mute);max-width:440px;margin:0 auto 20px}
+.dots{display:flex;gap:6px;justify-content:center;margin-bottom:18px}
+.dots i{width:8px;height:8px;border-radius:50%;background:var(--border)} .dots i.on{background:var(--brand-b);width:22px;border-radius:4px}
+.welcome .primary{max-width:260px}
+@media (max-width:560px){.charts{grid-template-columns:1fr}}
+[hidden]{display:none!important}
+@media (max-width:560px){.hero{grid-template-columns:1fr;justify-items:center;text-align:center}.stats{grid-template-columns:repeat(2,1fr)}
+  header{flex-wrap:wrap}.brand{flex:1 1 calc(100% - 60px)}.lang{margin-inline-start:52px}}
+</style>
+</head>
+<body>
+<div class="update-bar" id="update-bar" role="alert" hidden>
+  <div class="in">
+    <div><b id="upd-title"></b><div class="sub" id="upd-text"></div></div>
+    <button id="upd-btn" data-t="upd_btn"></button>
+  </div>
+</div>
+
+<div class="wrap">
+  <header>
+    <img src="/logo.svg" alt="">
+    <div class="brand"><h1 data-t="app_title"></h1><p data-t="tagline"></p></div>
+    <select class="lang" id="lang" aria-label="Language">
+      <option value="en">English</option>
+      <option value="fr">Français</option>
+      <option value="es">Español</option>
+      <option value="tr">Türkçe</option>
+      <option value="id">Bahasa Indonesia</option>
+    </select>
+  </header>
+
+  <!-- welcome (first run) -->
+  <section class="card welcome" id="welcome" hidden>
+    <img src="/logo.svg" alt="">
+    <div class="dots" id="w-dots"><i></i><i></i><i></i></div>
+    <h2 id="w-title"></h2>
+    <p id="w-text"></p>
+    <button class="primary" id="w-next"></button>
+  </section>
+
+  <!-- status -->
+  <section class="card" id="hero-card" hidden>
+    <div class="hero s-starting" id="hero">
+      <div class="ring">
+        <svg viewBox="0 0 160 160"><circle class="track" cx="80" cy="80" r="68" fill="none" stroke-width="12"/>
+          <circle class="arc" id="arc" cx="80" cy="80" r="68" fill="none" stroke-width="12" stroke-linecap="round" stroke-dasharray="427.3" stroke-dashoffset="427.3"/></svg>
+        <div class="center"><div class="big" id="ring-big"></div><div class="small" id="ring-small"></div><div class="dot" id="ring-dot" hidden></div></div>
+      </div>
+      <div>
+        <p class="state" id="state"></p>
+        <p class="sentence" id="sentence"></p>
+        <p class="eta" id="eta" hidden></p>
+        <span class="chip" data-t="role"></span>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><span data-t="stat_best"></span><b id="best">—</b></div>
+      <div class="stat"><span data-t="stat_final"></span><b id="fin">—</b></div>
+      <div class="stat"><span data-t="stat_peers"></span><b id="peers">—</b></div>
+      <div class="stat"><span data-t="stat_uptime"></span><b id="uptime">—</b></div>
+      <div class="stat"><span data-t="stat_verified"></span><b id="verified">—</b></div>
+    </div>
+    <div class="warns" id="warns"></div>
+  </section>
+
+  <section class="card repair" id="repair-card" hidden>
+    <div class="row">
+      <div class="setting"><b data-t="st_needs_repair"></b><small data-t="repair_hint"></small></div>
+      <button class="danger" id="repair-btn" data-t="repair_btn"></button>
+    </div>
+  </section>
+
+  <section class="card" id="chart-card" hidden>
+    <h2 data-t="chart_title"></h2>
+    <div class="charts">
+      <div class="chart"><div class="lbl"><span data-t="chart_blocks"></span><b id="c-bpm">—</b></div><svg id="c-blocks" viewBox="0 0 200 54" preserveAspectRatio="none"></svg></div>
+      <div class="chart"><div class="lbl"><span data-t="chart_peers"></span><b id="c-peers-now">—</b></div><svg id="c-peers" viewBox="0 0 200 54" preserveAspectRatio="none"></svg></div>
+    </div>
+    <p class="hint" id="chart-empty" data-t="chart_empty"></p>
+  </section>
+
+  <!-- account: form, then locked view -->
+  <section class="card" id="acc-form" hidden>
+    <h2 data-t="account_title"></h2>
+    <label class="fld" for="name" data-t="name_label"></label>
+    <input id="name" type="text" maxlength="20" autocomplete="nickname">
+    <p class="hint" data-t="name_hint"></p>
+    <label class="fld" for="email" data-t="email_label"></label>
+    <input id="email" type="email" maxlength="254" autocomplete="email" placeholder="name@example.com">
+    <div class="note"><span data-t="privacy_note"></span><br><b data-t="lock_note"></b></div>
+    <button class="primary" id="acc-btn" data-t="save_btn" disabled></button>
+    <div class="err" id="acc-err"></div>
+  </section>
+
+  <section class="card" id="acc-view" hidden>
+    <h2><span data-t="account_title"></span> <span class="lock">· <span data-t="locked"></span></span></h2>
+    <dl>
+      <dt data-t="name_label"></dt><dd id="acc-name"></dd>
+      <dt data-t="email_label"></dt><dd id="acc-email" dir="ltr"></dd>
+      <dt data-t="registry"></dt><dd id="acc-reg"></dd>
+    </dl>
+  </section>
+
+  <section class="card" id="settings" hidden>
+    <h2 data-t="settings_title"></h2>
+    <div class="row">
+      <div class="setting"><b data-t="autostart"></b><small data-t="autostart_hint"></small></div>
+      <label class="switch"><input type="checkbox" id="autostart"><span></span></label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <div class="setting"><b data-t="saver"></b><small data-t="saver_hint"></small></div>
+      <label class="switch"><input type="checkbox" id="saver"><span></span></label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <div class="setting"><b data-t="help_title"></b><small data-t="help_hint"></small></div>
+      <label class="switch"><input type="checkbox" id="help-net"><span></span></label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <div class="setting"><b data-t="report_title"></b><small data-t="report_hint"></small></div>
+      <button id="report-btn" data-t="report_btn"></button>
+    </div>
+    <div class="row" style="margin-top:18px">
+      <small class="hint" data-t="close_hint"></small>
+      <button class="danger" id="stop-btn" data-t="stop_btn"></button>
+    </div>
+  </section>
+
+  <section class="card" id="off" hidden>
+    <div class="hero s-stopped">
+      <div class="ring"><svg viewBox="0 0 160 160"><circle class="track" cx="80" cy="80" r="68" fill="none" stroke-width="12"/></svg>
+        <div class="center"><div class="dot"></div></div></div>
+      <div><p class="state" id="off-title"></p><p class="sentence" id="off-hint"></p></div>
+    </div>
+  </section>
+
+  <footer id="foot"></footer>
+</div>
+
+<script>
+const TOKEN = "{{TOKEN}}";
+const $ = id => document.getElementById(id);
+
+const I18N = {
+en:{app_title:"MADAR Node",tagline:"A full node running quietly on this computer",account_title:"Your account",name_label:"Display name",name_hint:"3–20 characters: letters, numbers, spaces and hyphens.",email_label:"Email",privacy_note:"No password. Only your name, email and the last 8 characters of your node ID are sent to the MADAR registry.",lock_note:"Your name and email cannot be changed after saving.",save_btn:"Save and start",confirm_save:"Save your name and email? They cannot be changed later.",locked:"locked",registry:"Registry",role:"Full node · does not vote",settings_title:"Settings",autostart:"Start with Windows",autostart_hint:"Starts quietly in the background when you sign in.",stop_btn:"Stop node",confirm_stop:"Stop the MADAR node? Your data is kept.",close_hint:"You can close this page — the node keeps running in the background.",stat_best:"Best block",stat_final:"Finalized",stat_peers:"Peers",stat_uptime:"Running for",synced:"synced",
+st_needs_account:"Waiting for your account",st_stopped:"Stopped",st_starting:"Starting…",st_connecting:"Connecting…",st_disconnected:"Disconnected",st_catching_up:"Catching up",st_running:"Running",
+se_running:"Your node is in sync and helping the network.",se_catching_up:"Downloading blocks to catch up with the network.",se_connecting:"Looking for peers on the network…",se_starting:"Starting the node — this can take a minute.",se_disconnected:"No connection to the network. Check your internet; if it continues, stop and start again. No router ports are needed.",se_stopped:"The node is stopped. Your data is kept.",
+reg_sent:"Sent to the MADAR registry",reg_waiting_peer_id:"Waiting for the node ID…",reg_waiting_registry:"Saved on this computer — it will be sent when the MADAR registry opens",reg_bad_registry:"The registry address is not accepted — nothing is sent",reg_retrying:"Sending failed — retrying automatically",reg_pending:"Sending…",
+off_title:"Stopped",off_hint:"Your data is kept. To start again, open MADAR Node from your desktop.",updating_title:"Updating…",updating_hint:"Installing the new version — MADAR will reopen by itself.",
+upd_title:"New update: {v}",upd_required:"Improvements and additions for a smoother experience. Your data and account stay as they are.",upd_btn:"Update now",upd_downloading:"Downloading the update…",upd_verifying:"Verifying the update…",upd_launching:"Installing — this page will come back shortly.",
+e_download_failed:"The update could not be downloaded. Please try again.",e_sha_mismatch:"The update file did not match its fingerprint. Nothing was installed.",e_launch_failed:"The installer could not start.",e_no_update:"No update is ready right now.",check_failed:"Could not check for updates right now",version:"Version",
+e_name_length:"The name must be 3 to 20 characters.",e_name_chars:"Use letters, numbers, spaces and hyphens only.",e_name_link:"Links are not allowed in the name.",e_name_letters:"The name needs at least two letters or digits.",e_email_invalid:"This email address is not valid.",e_account_locked:"The account is saved and locked.",e_save_failed:"The account could not be saved.",e_bad_token:"This page has expired — reopen MADAR Node.",e_autostart_failed:"Could not change the startup setting.",e_generic:"Something went wrong.",
+u_d:"d",u_h:"h",u_m:"m"},
+fr:{app_title:"Nœud MADAR",tagline:"Un nœud complet qui tourne discrètement sur cet ordinateur",account_title:"Votre compte",name_label:"Nom affiché",name_hint:"3 à 20 caractères : lettres, chiffres, espaces et tirets.",email_label:"E-mail",privacy_note:"Aucun mot de passe. Seuls votre nom, votre e-mail et les 8 derniers caractères de l'ID de votre nœud sont envoyés au registre MADAR.",lock_note:"Le nom et l'e-mail ne peuvent plus être modifiés après l'enregistrement.",save_btn:"Enregistrer et démarrer",confirm_save:"Enregistrer votre nom et votre e-mail ? Ils ne pourront plus être modifiés.",locked:"verrouillé",registry:"Registre",role:"Nœud complet · ne vote pas",settings_title:"Paramètres",autostart:"Démarrer avec Windows",autostart_hint:"Démarre discrètement en arrière-plan à la connexion.",stop_btn:"Arrêter le nœud",confirm_stop:"Arrêter le nœud MADAR ? Vos données sont conservées.",close_hint:"Vous pouvez fermer cette page — le nœud continue en arrière-plan.",stat_best:"Meilleur bloc",stat_final:"Finalisé",stat_peers:"Pairs",stat_uptime:"Actif depuis",synced:"synchronisé",
+st_needs_account:"En attente de votre compte",st_stopped:"Arrêté",st_starting:"Démarrage…",st_connecting:"Connexion…",st_disconnected:"Déconnecté",st_catching_up:"Rattrapage",st_running:"En marche",
+se_running:"Votre nœud est synchronisé et aide le réseau.",se_catching_up:"Téléchargement des blocs pour rattraper le réseau.",se_connecting:"Recherche de pairs sur le réseau…",se_starting:"Démarrage du nœud — cela peut prendre une minute.",se_disconnected:"Pas de connexion au réseau. Vérifiez Internet ; si cela continue, arrêtez puis redémarrez. Aucun port à ouvrir sur le routeur.",se_stopped:"Le nœud est arrêté. Vos données sont conservées.",
+reg_sent:"Envoyé au registre MADAR",reg_waiting_peer_id:"En attente de l'ID du nœud…",reg_waiting_registry:"Enregistré sur cet ordinateur — envoyé à l'ouverture du registre MADAR",reg_bad_registry:"L'adresse du registre n'est pas acceptée — rien n'est envoyé",reg_retrying:"Échec de l'envoi — nouvel essai automatique",reg_pending:"Envoi…",
+off_title:"Arrêté",off_hint:"Vos données sont conservées. Pour redémarrer, ouvrez MADAR Node depuis le bureau.",updating_title:"Mise à jour…",updating_hint:"Installation de la nouvelle version — MADAR se rouvrira seul.",
+upd_title:"Nouvelle mise à jour : {v}",upd_required:"Améliorations et nouveautés pour une expérience plus fluide. Vos données et votre compte restent intacts.",upd_btn:"Mettre à jour",upd_downloading:"Téléchargement de la mise à jour…",upd_verifying:"Vérification de la mise à jour…",upd_launching:"Installation — cette page reviendra bientôt.",
+e_download_failed:"Impossible de télécharger la mise à jour. Réessayez.",e_sha_mismatch:"Le fichier ne correspond pas à son empreinte. Rien n'a été installé.",e_launch_failed:"Impossible de lancer l'installateur.",e_no_update:"Aucune mise à jour prête pour le moment.",check_failed:"Impossible de vérifier les mises à jour",version:"Version",
+e_name_length:"Le nom doit comporter 3 à 20 caractères.",e_name_chars:"Utilisez uniquement des lettres, chiffres, espaces et tirets.",e_name_link:"Les liens ne sont pas autorisés dans le nom.",e_name_letters:"Le nom doit contenir au moins deux lettres ou chiffres.",e_email_invalid:"Cette adresse e-mail n'est pas valide.",e_account_locked:"Le compte est enregistré et verrouillé.",e_save_failed:"Impossible d'enregistrer le compte.",e_bad_token:"Cette page a expiré — rouvrez MADAR Node.",e_autostart_failed:"Impossible de modifier le démarrage.",e_generic:"Une erreur s'est produite.",
+u_d:"j",u_h:"h",u_m:"min"},
+es:{app_title:"Nodo MADAR",tagline:"Un nodo completo que funciona en silencio en este equipo",account_title:"Tu cuenta",name_label:"Nombre visible",name_hint:"De 3 a 20 caracteres: letras, números, espacios y guiones.",email_label:"Correo electrónico",privacy_note:"Sin contraseña. Solo se envían al registro de MADAR tu nombre, tu correo y los últimos 8 caracteres del ID de tu nodo.",lock_note:"El nombre y el correo no se pueden cambiar después de guardar.",save_btn:"Guardar e iniciar",confirm_save:"¿Guardar tu nombre y correo? No podrás cambiarlos después.",locked:"bloqueado",registry:"Registro",role:"Nodo completo · no vota",settings_title:"Ajustes",autostart:"Iniciar con Windows",autostart_hint:"Se inicia en segundo plano al iniciar sesión.",stop_btn:"Detener nodo",confirm_stop:"¿Detener el nodo MADAR? Tus datos se conservan.",close_hint:"Puedes cerrar esta página: el nodo sigue en segundo plano.",stat_best:"Mejor bloque",stat_final:"Finalizado",stat_peers:"Pares",stat_uptime:"Activo desde",synced:"sincronizado",
+st_needs_account:"Esperando tu cuenta",st_stopped:"Detenido",st_starting:"Iniciando…",st_connecting:"Conectando…",st_disconnected:"Desconectado",st_catching_up:"Poniéndose al día",st_running:"Funcionando",
+se_running:"Tu nodo está sincronizado y ayuda a la red.",se_catching_up:"Descargando bloques para alcanzar a la red.",se_connecting:"Buscando pares en la red…",se_starting:"Iniciando el nodo; puede tardar un minuto.",se_disconnected:"Sin conexión a la red. Revisa tu internet; si continúa, detén e inicia de nuevo. No hace falta abrir puertos del router.",se_stopped:"El nodo está detenido. Tus datos se conservan.",
+reg_sent:"Enviado al registro de MADAR",reg_waiting_peer_id:"Esperando el ID del nodo…",reg_waiting_registry:"Guardado en este equipo; se enviará cuando abra el registro de MADAR",reg_bad_registry:"La dirección del registro no es válida; no se envía nada",reg_retrying:"Falló el envío; se reintentará automáticamente",reg_pending:"Enviando…",
+off_title:"Detenido",off_hint:"Tus datos se conservan. Para iniciar de nuevo, abre MADAR Node desde el escritorio.",updating_title:"Actualizando…",updating_hint:"Instalando la nueva versión; MADAR se abrirá de nuevo solo.",
+upd_title:"Nueva actualización: {v}",upd_required:"Mejoras y novedades para una experiencia más fluida. Tus datos y tu cuenta se mantienen intactos.",upd_btn:"Actualizar ahora",upd_downloading:"Descargando la actualización…",upd_verifying:"Verificando la actualización…",upd_launching:"Instalando; esta página volverá en breve.",
+e_download_failed:"No se pudo descargar la actualización. Inténtalo de nuevo.",e_sha_mismatch:"El archivo no coincide con su huella. No se instaló nada.",e_launch_failed:"No se pudo iniciar el instalador.",e_no_update:"No hay ninguna actualización lista.",check_failed:"No se pudieron buscar actualizaciones",version:"Versión",
+e_name_length:"El nombre debe tener de 3 a 20 caracteres.",e_name_chars:"Usa solo letras, números, espacios y guiones.",e_name_link:"No se permiten enlaces en el nombre.",e_name_letters:"El nombre necesita al menos dos letras o números.",e_email_invalid:"Este correo no es válido.",e_account_locked:"La cuenta está guardada y bloqueada.",e_save_failed:"No se pudo guardar la cuenta.",e_bad_token:"Esta página caducó; vuelve a abrir MADAR Node.",e_autostart_failed:"No se pudo cambiar el inicio automático.",e_generic:"Algo salió mal.",
+u_d:"d",u_h:"h",u_m:"min"},
+tr:{app_title:"MADAR Düğümü",tagline:"Bu bilgisayarda sessizce çalışan tam düğüm",account_title:"Hesabınız",name_label:"Görünen ad",name_hint:"3–20 karakter: harf, rakam, boşluk ve kısa çizgi.",email_label:"E-posta",privacy_note:"Parola yok. MADAR kayıt defterine yalnızca adınız, e-postanız ve düğüm kimliğinizin son 8 karakteri gönderilir.",lock_note:"Ad ve e-posta kaydedildikten sonra değiştirilemez.",save_btn:"Kaydet ve başlat",confirm_save:"Adınız ve e-postanız kaydedilsin mi? Sonra değiştirilemez.",locked:"kilitli",registry:"Kayıt",role:"Tam düğüm · oy vermez",settings_title:"Ayarlar",autostart:"Windows ile başlat",autostart_hint:"Oturum açtığınızda arka planda sessizce başlar.",stop_btn:"Düğümü durdur",confirm_stop:"MADAR düğümü durdurulsun mu? Verileriniz korunur.",close_hint:"Bu sayfayı kapatabilirsiniz; düğüm arka planda çalışmaya devam eder.",stat_best:"En iyi blok",stat_final:"Kesinleşen",stat_peers:"Eşler",stat_uptime:"Çalışma süresi",synced:"senkron",
+st_needs_account:"Hesabınız bekleniyor",st_stopped:"Durduruldu",st_starting:"Başlatılıyor…",st_connecting:"Bağlanıyor…",st_disconnected:"Bağlantı yok",st_catching_up:"Yetişiyor",st_running:"Çalışıyor",
+se_running:"Düğümünüz senkron ve ağa yardım ediyor.",se_catching_up:"Ağa yetişmek için bloklar indiriliyor.",se_connecting:"Ağda eş aranıyor…",se_starting:"Düğüm başlatılıyor; bir dakika sürebilir.",se_disconnected:"Ağa bağlantı yok. İnternetinizi kontrol edin; devam ederse durdurup yeniden başlatın. Modemde port açmanız gerekmez.",se_stopped:"Düğüm durduruldu. Verileriniz korunur.",
+reg_sent:"MADAR kaydına gönderildi",reg_waiting_peer_id:"Düğüm kimliği bekleniyor…",reg_waiting_registry:"Bu bilgisayarda kaydedildi; MADAR kaydı açıldığında gönderilecek",reg_bad_registry:"Kayıt adresi kabul edilmiyor; hiçbir şey gönderilmez",reg_retrying:"Gönderilemedi; otomatik olarak yeniden denenecek",reg_pending:"Gönderiliyor…",
+off_title:"Durduruldu",off_hint:"Verileriniz korunur. Yeniden başlatmak için masaüstünden MADAR Node'u açın.",updating_title:"Güncelleniyor…",updating_hint:"Yeni sürüm kuruluyor; MADAR kendiliğinden yeniden açılacak.",
+upd_title:"Yeni güncelleme: {v}",upd_required:"Daha akıcı bir deneyim için iyileştirmeler ve yenilikler. Verileriniz ve hesabınız olduğu gibi kalır.",upd_btn:"Şimdi güncelle",upd_downloading:"Güncelleme indiriliyor…",upd_verifying:"Güncelleme doğrulanıyor…",upd_launching:"Kuruluyor; bu sayfa birazdan geri gelecek.",
+e_download_failed:"Güncelleme indirilemedi. Lütfen tekrar deneyin.",e_sha_mismatch:"Dosya parmak iziyle eşleşmedi. Hiçbir şey kurulmadı.",e_launch_failed:"Kurulum başlatılamadı.",e_no_update:"Şu anda hazır güncelleme yok.",check_failed:"Güncellemeler şu anda kontrol edilemedi",version:"Sürüm",
+e_name_length:"Ad 3 ile 20 karakter arasında olmalı.",e_name_chars:"Yalnızca harf, rakam, boşluk ve kısa çizgi kullanın.",e_name_link:"Adda bağlantıya izin verilmez.",e_name_letters:"Ad en az iki harf veya rakam içermeli.",e_email_invalid:"Bu e-posta adresi geçerli değil.",e_account_locked:"Hesap kaydedildi ve kilitlendi.",e_save_failed:"Hesap kaydedilemedi.",e_bad_token:"Bu sayfanın süresi doldu; MADAR Node'u yeniden açın.",e_autostart_failed:"Başlangıç ayarı değiştirilemedi.",e_generic:"Bir hata oluştu.",
+u_d:"g",u_h:"sa",u_m:"dk"},
+id:{app_title:"Node MADAR",tagline:"Node penuh yang berjalan tenang di komputer ini",account_title:"Akun Anda",name_label:"Nama tampilan",name_hint:"3–20 karakter: huruf, angka, spasi, dan tanda hubung.",email_label:"Email",privacy_note:"Tanpa kata sandi. Hanya nama, email, dan 8 karakter terakhir ID node Anda yang dikirim ke registri MADAR.",lock_note:"Nama dan email tidak dapat diubah setelah disimpan.",save_btn:"Simpan dan mulai",confirm_save:"Simpan nama dan email Anda? Keduanya tidak dapat diubah nanti.",locked:"terkunci",registry:"Registri",role:"Node penuh · tidak memberi suara",settings_title:"Pengaturan",autostart:"Mulai bersama Windows",autostart_hint:"Berjalan diam-diam di latar belakang saat Anda masuk.",stop_btn:"Hentikan node",confirm_stop:"Hentikan node MADAR? Data Anda tetap tersimpan.",close_hint:"Anda boleh menutup halaman ini — node tetap berjalan di latar belakang.",stat_best:"Blok terbaik",stat_final:"Final",stat_peers:"Peer",stat_uptime:"Berjalan selama",synced:"tersinkron",
+st_needs_account:"Menunggu akun Anda",st_stopped:"Berhenti",st_starting:"Memulai…",st_connecting:"Menghubungkan…",st_disconnected:"Terputus",st_catching_up:"Mengejar jaringan",st_running:"Berjalan",
+se_running:"Node Anda tersinkron dan membantu jaringan.",se_catching_up:"Mengunduh blok untuk mengejar jaringan.",se_connecting:"Mencari peer di jaringan…",se_starting:"Memulai node — mungkin perlu satu menit.",se_disconnected:"Tidak ada koneksi ke jaringan. Periksa internet Anda; jika berlanjut, hentikan lalu mulai lagi. Tidak perlu membuka port router.",se_stopped:"Node berhenti. Data Anda tetap tersimpan.",
+reg_sent:"Terkirim ke registri MADAR",reg_waiting_peer_id:"Menunggu ID node…",reg_waiting_registry:"Tersimpan di komputer ini — akan dikirim saat registri MADAR dibuka",reg_bad_registry:"Alamat registri tidak diterima — tidak ada yang dikirim",reg_retrying:"Gagal mengirim — mencoba lagi otomatis",reg_pending:"Mengirim…",
+off_title:"Berhenti",off_hint:"Data Anda tetap tersimpan. Untuk memulai lagi, buka MADAR Node dari desktop.",updating_title:"Memperbarui…",updating_hint:"Memasang versi baru — MADAR akan terbuka kembali dengan sendirinya.",
+upd_title:"Pembaruan baru: {v}",upd_required:"Peningkatan dan fitur baru untuk pengalaman yang lebih mulus. Data dan akun Anda tetap seperti semula.",upd_btn:"Perbarui sekarang",upd_downloading:"Mengunduh pembaruan…",upd_verifying:"Memverifikasi pembaruan…",upd_launching:"Memasang — halaman ini akan kembali sebentar lagi.",
+e_download_failed:"Pembaruan tidak dapat diunduh. Coba lagi.",e_sha_mismatch:"Berkas tidak cocok dengan sidik jarinya. Tidak ada yang dipasang.",e_launch_failed:"Pemasang tidak dapat dijalankan.",e_no_update:"Belum ada pembaruan yang siap.",check_failed:"Tidak dapat memeriksa pembaruan saat ini",version:"Versi",
+e_name_length:"Nama harus 3 sampai 20 karakter.",e_name_chars:"Gunakan hanya huruf, angka, spasi, dan tanda hubung.",e_name_link:"Tautan tidak diizinkan dalam nama.",e_name_letters:"Nama perlu setidaknya dua huruf atau angka.",e_email_invalid:"Alamat email ini tidak valid.",e_account_locked:"Akun sudah disimpan dan dikunci.",e_save_failed:"Akun tidak dapat disimpan.",e_bad_token:"Halaman ini kedaluwarsa — buka kembali MADAR Node.",e_autostart_failed:"Pengaturan mulai otomatis tidak dapat diubah.",e_generic:"Terjadi kesalahan.",
+u_d:"h",u_h:"j",u_m:"m"}
+};
+// Strings for the extra features (welcome, time remaining, chart, device health, repair, saver).
+Object.assign(I18N.en, {st_paused:"Paused",st_needs_repair:"Needs repair",st_bootstrapping:"Fast setup",se_paused_battery:"Paused to save power while on battery. It resumes when you plug in.",se_paused_metered:"Paused on a metered connection. It resumes on your regular internet.",se_needs_repair:"The node keeps stopping. Press Repair to rebuild its chain data.",se_bootstrap_downloading:"Downloading a verified snapshot so your node is ready in seconds…",se_bootstrap_extracting:"Unpacking the snapshot…",eta:"about {v} left",u_min:"min",u_sec:"sec",stat_verified:"Blocks verified",chart_title:"Last hour",chart_blocks:"Blocks / min",chart_peers:"Peers",chart_empty:"The chart fills in as the node runs.",saver:"Saver mode",saver_hint:"Pause the node on battery or on a metered connection.",repair_btn:"Repair",repair_hint:"Rebuilds the chain data. Your account and node identity are kept.",confirm_repair:"Repair the node? Its chain data will be rebuilt.",warn_disk:"Low disk space: {v} GB free. Free some space so the node keeps running.",warn_clock:"Your clock is off by {v} seconds. Turn on “Set time automatically” in Windows settings.",e_no_repair_needed:"No repair is needed right now.",
+w1_title:"Welcome to MADAR",w1_text:"This app runs a MADAR full node on your computer. It checks every new block and keeps a copy of the network — quietly, in the background.",w2_title:"Light and safe",w2_text:"It uses a small part of your processor and memory, opens no router ports, and never votes or holds your keys.",w3_title:"Your privacy",w3_text:"No password. Only your display name, your email and the last 8 characters of your node ID are sent to the MADAR registry.",next:"Next",get_started:"Get started",step:"Step {v} of 3"});
+Object.assign(I18N.fr, {st_paused:"En pause",st_needs_repair:"Réparation requise",st_bootstrapping:"Installation rapide",se_paused_battery:"En pause pour économiser la batterie. Reprend dès que vous branchez le chargeur.",se_paused_metered:"En pause sur une connexion limitée. Reprend sur votre connexion habituelle.",se_needs_repair:"Le nœud s'arrête sans cesse. Cliquez sur Réparer pour reconstruire ses données.",se_bootstrap_downloading:"Téléchargement d'un instantané vérifié pour être prêt en quelques secondes…",se_bootstrap_extracting:"Décompression de l'instantané…",eta:"environ {v} restantes",u_min:"min",u_sec:"s",stat_verified:"Blocs vérifiés",chart_title:"Dernière heure",chart_blocks:"Blocs / min",chart_peers:"Pairs",chart_empty:"Le graphique se remplit pendant que le nœud tourne.",saver:"Mode économie",saver_hint:"Mettre le nœud en pause sur batterie ou sur une connexion limitée.",repair_btn:"Réparer",repair_hint:"Reconstruit les données de la chaîne. Votre compte et l'identité du nœud sont conservés.",confirm_repair:"Réparer le nœud ? Ses données de chaîne seront reconstruites.",warn_disk:"Espace disque faible : {v} Go libres. Libérez de l'espace pour que le nœud continue.",warn_clock:"Votre horloge a {v} secondes d'écart. Activez « Régler l'heure automatiquement » dans Windows.",e_no_repair_needed:"Aucune réparation n'est nécessaire.",
+w1_title:"Bienvenue sur MADAR",w1_text:"Cette application fait tourner un nœud complet MADAR sur votre ordinateur. Il vérifie chaque nouveau bloc et garde une copie du réseau, discrètement.",w2_title:"Léger et sûr",w2_text:"Il utilise peu de processeur et de mémoire, n'ouvre aucun port du routeur, ne vote pas et ne détient pas vos clés.",w3_title:"Votre vie privée",w3_text:"Aucun mot de passe. Seuls votre nom affiché, votre e-mail et les 8 derniers caractères de l'ID de votre nœud sont envoyés au registre MADAR.",next:"Suivant",get_started:"Commencer",step:"Étape {v} sur 3"});
+Object.assign(I18N.es, {st_paused:"En pausa",st_needs_repair:"Necesita reparación",st_bootstrapping:"Configuración rápida",se_paused_battery:"En pausa para ahorrar batería. Se reanuda al conectar el cargador.",se_paused_metered:"En pausa en una conexión medida. Se reanuda en tu conexión habitual.",se_needs_repair:"El nodo se detiene una y otra vez. Pulsa Reparar para reconstruir sus datos.",se_bootstrap_downloading:"Descargando una instantánea verificada para estar listo en segundos…",se_bootstrap_extracting:"Descomprimiendo la instantánea…",eta:"quedan unos {v}",u_min:"min",u_sec:"s",stat_verified:"Bloques verificados",chart_title:"Última hora",chart_blocks:"Bloques / min",chart_peers:"Pares",chart_empty:"El gráfico se llena mientras el nodo funciona.",saver:"Modo ahorro",saver_hint:"Pausar el nodo con batería o en una conexión medida.",repair_btn:"Reparar",repair_hint:"Reconstruye los datos de la cadena. Tu cuenta y la identidad del nodo se conservan.",confirm_repair:"¿Reparar el nodo? Se reconstruirán sus datos de cadena.",warn_disk:"Poco espacio en disco: {v} GB libres. Libera espacio para que el nodo siga funcionando.",warn_clock:"Tu reloj está desfasado {v} segundos. Activa «Establecer la hora automáticamente» en Windows.",e_no_repair_needed:"No hace falta reparar ahora.",
+w1_title:"Bienvenido a MADAR",w1_text:"Esta aplicación ejecuta un nodo completo de MADAR en tu equipo. Verifica cada bloque nuevo y guarda una copia de la red, en silencio.",w2_title:"Ligero y seguro",w2_text:"Usa poca CPU y memoria, no abre puertos del router, no vota y no guarda tus claves.",w3_title:"Tu privacidad",w3_text:"Sin contraseña. Solo se envían al registro de MADAR tu nombre visible, tu correo y los últimos 8 caracteres del ID de tu nodo.",next:"Siguiente",get_started:"Empezar",step:"Paso {v} de 3"});
+Object.assign(I18N.tr, {st_paused:"Duraklatıldı",st_needs_repair:"Onarım gerekiyor",st_bootstrapping:"Hızlı kurulum",se_paused_battery:"Pil tasarrufu için duraklatıldı. Şarja takınca devam eder.",se_paused_metered:"Ölçülü bağlantıda duraklatıldı. Normal internetinizde devam eder.",se_needs_repair:"Düğüm sürekli duruyor. Zincir verilerini yeniden oluşturmak için Onar'a basın.",se_bootstrap_downloading:"Saniyeler içinde hazır olmak için doğrulanmış anlık görüntü indiriliyor…",se_bootstrap_extracting:"Anlık görüntü açılıyor…",eta:"yaklaşık {v} kaldı",u_min:"dk",u_sec:"sn",stat_verified:"Doğrulanan bloklar",chart_title:"Son bir saat",chart_blocks:"Blok / dk",chart_peers:"Eşler",chart_empty:"Grafik düğüm çalıştıkça dolar.",saver:"Tasarruf modu",saver_hint:"Pilde veya ölçülü bağlantıda düğümü duraklat.",repair_btn:"Onar",repair_hint:"Zincir verilerini yeniden oluşturur. Hesabınız ve düğüm kimliğiniz korunur.",confirm_repair:"Düğüm onarılsın mı? Zincir verileri yeniden oluşturulacak.",warn_disk:"Disk alanı az: {v} GB boş. Düğümün çalışmaya devam etmesi için yer açın.",warn_clock:"Saatiniz {v} saniye sapmış. Windows ayarlarında “Saati otomatik ayarla”yı açın.",e_no_repair_needed:"Şu anda onarım gerekmiyor.",
+w1_title:"MADAR'a hoş geldiniz",w1_text:"Bu uygulama bilgisayarınızda tam bir MADAR düğümü çalıştırır. Her yeni bloğu doğrular ve ağın bir kopyasını sessizce tutar.",w2_title:"Hafif ve güvenli",w2_text:"İşlemci ve belleğin küçük bir kısmını kullanır, modemde port açmaz, oy vermez ve anahtarlarınızı tutmaz.",w3_title:"Gizliliğiniz",w3_text:"Parola yok. MADAR kaydına yalnızca görünen adınız, e-postanız ve düğüm kimliğinizin son 8 karakteri gönderilir.",next:"İleri",get_started:"Başla",step:"Adım {v} / 3"});
+Object.assign(I18N.id, {st_paused:"Dijeda",st_needs_repair:"Perlu perbaikan",st_bootstrapping:"Penyiapan cepat",se_paused_battery:"Dijeda untuk menghemat baterai. Berlanjut saat pengisi daya dicolokkan.",se_paused_metered:"Dijeda pada koneksi terukur. Berlanjut di internet biasa Anda.",se_needs_repair:"Node terus berhenti. Tekan Perbaiki untuk membangun ulang data rantainya.",se_bootstrap_downloading:"Mengunduh snapshot terverifikasi agar siap dalam hitungan detik…",se_bootstrap_extracting:"Membuka snapshot…",eta:"sekitar {v} lagi",u_min:"mnt",u_sec:"dtk",stat_verified:"Blok diverifikasi",chart_title:"Satu jam terakhir",chart_blocks:"Blok / mnt",chart_peers:"Peer",chart_empty:"Grafik terisi saat node berjalan.",saver:"Mode hemat",saver_hint:"Jeda node saat memakai baterai atau koneksi terukur.",repair_btn:"Perbaiki",repair_hint:"Membangun ulang data rantai. Akun dan identitas node Anda tetap tersimpan.",confirm_repair:"Perbaiki node? Data rantainya akan dibangun ulang.",warn_disk:"Ruang disk hampir habis: {v} GB tersisa. Kosongkan ruang agar node tetap berjalan.",warn_clock:"Jam Anda selisih {v} detik. Aktifkan “Atur waktu otomatis” di pengaturan Windows.",e_no_repair_needed:"Belum perlu perbaikan.",
+w1_title:"Selamat datang di MADAR",w1_text:"Aplikasi ini menjalankan node penuh MADAR di komputer Anda. Node memverifikasi setiap blok baru dan menyimpan salinan jaringan, dengan tenang.",w2_title:"Ringan dan aman",w2_text:"Hanya memakai sedikit prosesor dan memori, tidak membuka port router, tidak memberi suara, dan tidak menyimpan kunci Anda.",w3_title:"Privasi Anda",w3_text:"Tanpa kata sandi. Hanya nama tampilan, email, dan 8 karakter terakhir ID node Anda yang dikirim ke registri MADAR.",next:"Berikutnya",get_started:"Mulai",step:"Langkah {v} dari 3"});
+Object.assign(I18N.en, {help_title:"Help the network",help_hint:"Let other nodes connect to yours so the network is stronger. Windows may ask you to allow MADAR through the firewall. The node restarts to apply this.",report_title:"Problem report",report_hint:"Creates a file with technical logs (no email, account, keys or IP addresses) and opens an email to MADAR support.",report_btn:"Send a problem report",report_done:"The report file was created:\n{v}\n\nAttach it to the email that just opened and send it.",e_report_failed:"The report could not be created."});
+Object.assign(I18N.fr, {help_title:"Aider le réseau",help_hint:"Laissez d'autres nœuds se connecter au vôtre pour renforcer le réseau. Windows peut vous demander d'autoriser MADAR dans le pare-feu. Le nœud redémarre pour l'appliquer.",report_title:"Signaler un problème",report_hint:"Crée un fichier de journaux techniques (sans e-mail, compte, clés ni adresses IP) et ouvre un e-mail au support MADAR.",report_btn:"Envoyer un rapport",report_done:"Le fichier de rapport a été créé :\n{v}\n\nJoignez-le à l'e-mail qui vient de s'ouvrir, puis envoyez-le.",e_report_failed:"Impossible de créer le rapport."});
+Object.assign(I18N.es, {help_title:"Ayudar a la red",help_hint:"Permite que otros nodos se conecten al tuyo para fortalecer la red. Windows puede pedirte permitir MADAR en el firewall. El nodo se reinicia para aplicarlo.",report_title:"Informe de problema",report_hint:"Crea un archivo con registros técnicos (sin correo, cuenta, claves ni direcciones IP) y abre un correo al soporte de MADAR.",report_btn:"Enviar un informe",report_done:"Se creó el archivo del informe:\n{v}\n\nAdjúntalo al correo que se acaba de abrir y envíalo.",e_report_failed:"No se pudo crear el informe."});
+Object.assign(I18N.tr, {help_title:"Ağa yardım et",help_hint:"Ağın güçlenmesi için diğer düğümlerin sizinkine bağlanmasına izin verin. Windows güvenlik duvarında MADAR'a izin vermenizi isteyebilir. Uygulamak için düğüm yeniden başlar.",report_title:"Sorun bildirimi",report_hint:"Teknik günlükleri içeren bir dosya oluşturur (e-posta, hesap, anahtar veya IP adresi olmadan) ve MADAR desteğine bir e-posta açar.",report_btn:"Sorun bildir",report_done:"Rapor dosyası oluşturuldu:\n{v}\n\nAçılan e-postaya ekleyip gönderin.",e_report_failed:"Rapor oluşturulamadı."});
+Object.assign(I18N.id, {help_title:"Bantu jaringan",help_hint:"Izinkan node lain terhubung ke node Anda agar jaringan lebih kuat. Windows mungkin meminta izin firewall untuk MADAR. Node dimulai ulang untuk menerapkannya.",report_title:"Laporan masalah",report_hint:"Membuat berkas berisi log teknis (tanpa email, akun, kunci, atau alamat IP) dan membuka email ke dukungan MADAR.",report_btn:"Kirim laporan masalah",report_done:"Berkas laporan telah dibuat:\n{v}\n\nLampirkan ke email yang baru terbuka lalu kirim.",e_report_failed:"Laporan tidak dapat dibuat."});
+let LANG = "en", stopped = false, updating = false, built = false, lastStatus = null;
+
+const t = (k, v) => ((I18N[LANG] && I18N[LANG][k]) || I18N.en[k] || k).replace("{v}", v ?? "");
+const nf = n => n == null ? "—" : new Intl.NumberFormat(LANG).format(n);
+
+function applyLang(lang) {
+  LANG = I18N[lang] ? lang : "en";
+  document.documentElement.lang = LANG;
+  document.documentElement.dir = "ltr";
+  $("lang").value = LANG;
+  document.querySelectorAll("[data-t]").forEach(el => el.textContent = t(el.dataset.t));
+  document.title = t("app_title");
+  if (lastStatus) render(lastStatus);
+}
+
+async function post(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json", "X-Madar-Token": TOKEN}, body: JSON.stringify(body || {})});
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  return {ok: r.ok, j};
+}
+
+$("lang").addEventListener("change", async e => { applyLang(e.target.value); try { await post("/api/settings", {lang: LANG}); } catch (_) {} });
+$("autostart").addEventListener("change", async e => {
+  const {ok, j} = await post("/api/settings", {autostart: e.target.checked});
+  if (!ok) { e.target.checked = !e.target.checked; alert(t("e_" + (j.error || "generic"))); }
+});
+
+function validate() {
+  const n = $("name").value.trim().length, em = $("email").value.trim();
+  $("acc-btn").disabled = !(n >= 3 && n <= 20 && /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(em));
+}
+$("name").addEventListener("input", validate);
+$("email").addEventListener("input", validate);
+$("acc-btn").addEventListener("click", async () => {
+  if (!confirm(t("confirm_save"))) return;
+  $("acc-btn").disabled = true; $("acc-err").textContent = "";
+  const {ok, j} = await post("/api/account", {name: $("name").value, email: $("email").value});
+  if (!ok) { $("acc-err").textContent = t("e_" + (j.error || "generic")); validate(); return; }
+  refresh();
+});
+$("stop-btn").addEventListener("click", async () => {
+  if (!confirm(t("confirm_stop"))) return;
+  $("stop-btn").disabled = true;
+  try { await post("/api/stop"); } catch (e) {}
+  stopped = true; showOff("off_title", "off_hint");
+});
+$("upd-btn").addEventListener("click", async () => {
+  $("upd-btn").disabled = true;
+  const {ok, j} = await post("/api/update");
+  if (!ok) { $("upd-text").textContent = t("e_" + (j.error || "generic")); $("upd-btn").disabled = false; }
+});
+
+function showOff(title, hint) {
+  ["hero-card", "acc-form", "acc-view", "settings"].forEach(s => $(s).hidden = true);
+  $("off").hidden = false; $("off-title").textContent = t(title); $("off-hint").textContent = t(hint);
+}
+
+// ===== welcome (first run) =====
+let wStep = 0;
+function renderWelcome() {
+  const n = wStep + 1;
+  $("w-title").textContent = t("w" + n + "_title");
+  $("w-text").textContent = t("w" + n + "_text");
+  $("w-next").textContent = n < 3 ? t("next") : t("get_started");
+  [...$("w-dots").children].forEach((d, i) => d.classList.toggle("on", i === wStep));
+}
+$("w-next").addEventListener("click", async () => {
+  if (wStep < 2) { wStep++; renderWelcome(); return; }
+  $("w-next").disabled = true;
+  try { await post("/api/settings", {onboarded: true}); } catch (_) {}
+  $("w-next").disabled = false;
+  refresh();
+});
+
+// ===== ETA from recent progress =====
+const syncSamples = [];
+function estimateEta(sync) {
+  const now = Date.now();
+  syncSamples.push([now, sync.current]);
+  while (syncSamples.length > 2 && now - syncSamples[0][0] > 60000) syncSamples.shift();
+  if (syncSamples.length < 2) return null;
+  const [t0, c0] = syncSamples[0];
+  const rate = (sync.current - c0) / ((now - t0) / 1000);
+  const left = sync.highest - sync.current;
+  return rate > 0 && left > 0 ? left / rate : null;
+}
+
+// ===== sparklines (last hour, samples every 30 s from the app) =====
+function sparkline(svg, values, color) {
+  if (values.length < 2) { svg.replaceChildren(); return; }
+  const max = Math.max(1, ...values), W = 200, H = 54, pad = 3;
+  const pts = values.map((v, i) => [i * (W / (values.length - 1)), H - pad - (v / max) * (H - 2 * pad)]);
+  const line = pts.map(([x, y], i) => (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1)).join(" ");
+  const ns = "http://www.w3.org/2000/svg";
+  const area = document.createElementNS(ns, "path");
+  area.setAttribute("d", line + ` L${W} ${H} L0 ${H} Z`); area.setAttribute("fill", color); area.setAttribute("fill-opacity", ".12");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", line); path.setAttribute("fill", "none"); path.setAttribute("stroke", color);
+  path.setAttribute("stroke-width", "2"); path.setAttribute("vector-effect", "non-scaling-stroke"); path.setAttribute("stroke-linejoin", "round");
+  svg.replaceChildren(area, path);
+}
+function renderCharts(hist) {
+  const bpm = [];
+  for (let i = 1; i < hist.length; i++) {
+    const dt = (hist[i][0] - hist[i - 1][0]) / 60;
+    bpm.push(dt > 0 ? Math.max(0, (hist[i][1] - hist[i - 1][1]) / dt) : 0);
+  }
+  const peers = hist.map(h => h[2]);
+  const css = getComputedStyle(document.documentElement);
+  sparkline($("c-blocks"), bpm, css.getPropertyValue("--brand-a").trim() || "#0FB5A6");
+  sparkline($("c-peers"), peers, css.getPropertyValue("--brand-b").trim() || "#2F5BEA");
+  $("c-bpm").textContent = bpm.length ? nf(Math.round(bpm[bpm.length - 1])) : "—";
+  $("c-peers-now").textContent = peers.length ? nf(peers[peers.length - 1]) : "—";
+  $("chart-empty").hidden = hist.length >= 2;
+}
+
+$("help-net").addEventListener("change", async e => {
+  const {ok, j} = await post("/api/settings", {help_network: e.target.checked});
+  if (!ok) { e.target.checked = !e.target.checked; alert(t("e_" + (j.error || "generic"))); }
+});
+$("report-btn").addEventListener("click", async () => {
+  $("report-btn").disabled = true;
+  const {ok, j} = await post("/api/report", {});
+  $("report-btn").disabled = false;
+  alert(ok ? t("report_done", j.file) : t("e_" + (j.error || "generic")));
+});
+$("saver").addEventListener("change", async e => {
+  const {ok, j} = await post("/api/settings", {saver: e.target.checked});
+  if (!ok) { e.target.checked = !e.target.checked; alert(t("e_" + (j.error || "generic"))); }
+});
+$("repair-btn").addEventListener("click", async () => {
+  if (!confirm(t("confirm_repair"))) return;
+  $("repair-btn").disabled = true;
+  const {ok, j} = await post("/api/repair", {});
+  $("repair-btn").disabled = false;
+  if (!ok) alert(t("e_" + (j.error || "generic")));
+  refresh();
+});
+
+function fmtUptime(s) {
+  if (s == null) return "—";
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${nf(d)}${t("u_d")} ${nf(h)}${t("u_h")}` : h ? `${nf(h)}${t("u_h")} ${nf(m)}${t("u_m")}` : `${nf(m)}${t("u_m")}`;
+}
+
+const ARC = 427.3;
+function renderHero(s) {
+  const hero = $("hero");
+  hero.className = "hero s-" + s.state;
+  $("state").textContent = t("st_" + s.state);
+  const sentenceKey = s.state === "paused" ? "se_paused_" + (s.paused || "battery")
+    : s.state === "bootstrapping" ? "se_bootstrap_" + (s.bootstrap || "downloading") : "se_" + s.state;
+  $("sentence").textContent = t(sentenceKey);
+  // Time remaining: from the block progress rate over the last minute (computed in the page).
+  const eta = s.state === "catching_up" && s.sync ? estimateEta(s.sync) : null;
+  $("eta").hidden = eta == null;
+  if (eta != null) $("eta").textContent = t("eta", eta < 60 ? `${nf(Math.max(1, Math.round(eta)))} ${t("u_sec")}` : `${nf(Math.ceil(eta / 60))} ${t("u_min")}`);
+  $("verified").textContent = nf(s.blocks_verified);
+  const warns = [];
+  const h = s.health || {};
+  if (h.disk_low) warns.push(t("warn_disk", nf(h.disk_free_gb)));
+  if (h.clock_bad) warns.push(t("warn_clock", nf(Math.round(Math.abs(h.clock_offset_s)))));
+  $("warns").replaceChildren(...warns.map(w => { const d = document.createElement("div"); d.className = "warn"; d.textContent = w; return d; }));
+  const pct = s.sync ? Math.min(100, Math.max(0, s.sync.percent)) : null;
+  let frac = 0, big = "", small = "", dot = false;
+  if (s.state === "running") { frac = 1; big = "✓"; small = t("synced"); }
+  else if (s.state === "catching_up" && pct != null) { frac = pct / 100; big = nf(Math.floor(pct)) + "%"; small = t("synced"); }
+  else if (s.state === "connecting" || s.state === "starting" || s.state === "bootstrapping") { frac = .15; dot = true; }
+  else if (s.state === "disconnected") { frac = pct != null ? pct / 100 : 1; dot = true; }
+  else { dot = true; }
+  $("arc").style.strokeDashoffset = String(ARC * (1 - frac));
+  $("ring-big").textContent = big; $("ring-small").textContent = small;
+  $("ring-dot").hidden = !dot; $("ring-big").hidden = dot; $("ring-small").hidden = dot;
+  $("best").textContent = nf(s.best); $("fin").textContent = nf(s.finalized);
+  $("peers").textContent = nf(s.peers); $("uptime").textContent = fmtUptime(s.uptime_secs);
+}
+
+function renderUpdate(u) {
+  const bar = $("update-bar");
+  if (!u || !u.available) { bar.hidden = true; updating = false; return; }
+  bar.hidden = false;
+  $("upd-title").textContent = t("upd_title", u.available);
+  const progress = {downloading: "upd_downloading", verifying: "upd_verifying", launching: "upd_launching"}[u.progress];
+  updating = !!progress;
+  $("upd-btn").hidden = !!progress;
+  const notes = u.notes && (u.notes[LANG] || u.notes.en);
+  $("upd-text").textContent = progress ? t(progress) : (u.progress === "failed" && u.error) ? t("e_" + u.error) : (notes ? notes + " — " : "") + t("upd_required");
+  if (u.progress === "failed") $("upd-btn").disabled = false;
+}
+
+function render(s) {
+  lastStatus = s;
+  renderUpdate(s.update);
+  $("foot").textContent = `${t("version")} ${s.version}` + (s.update && s.update.error && !s.update.available ? ` · ${t("check_failed")}` : "");
+  $("off").hidden = true;
+  if (!s.account) {
+    ["hero-card", "acc-view", "settings", "chart-card", "repair-card"].forEach(id => $(id).hidden = true);
+    const onboarded = s.settings && s.settings.onboarded;
+    $("welcome").hidden = !!onboarded; $("acc-form").hidden = !onboarded;
+    if (!onboarded) renderWelcome();
+    return;
+  }
+  $("welcome").hidden = true; $("acc-form").hidden = true;
+  $("hero-card").hidden = false; $("acc-view").hidden = false; $("settings").hidden = false; $("chart-card").hidden = false;
+  $("repair-card").hidden = s.state !== "needs_repair";
+  renderCharts(s.history || []);
+  $("saver").checked = !!(s.settings && s.settings.saver);
+  $("help-net").checked = !!(s.settings && s.settings.help_network);
+  renderHero(s);
+  $("acc-name").textContent = s.account.name;
+  $("acc-email").textContent = s.account.email;
+  $("acc-reg").textContent = s.registration ? t("reg_" + s.registration.state) : "—";
+  $("autostart").checked = !!(s.settings && s.settings.autostart);
+}
+
+async function refresh() {
+  if (stopped) return;
+  let s;
+  try { s = await (await fetch("/api/status", {cache: "no-store"})).json(); }
+  catch (e) { showOff(updating ? "updating_title" : "off_title", updating ? "updating_hint" : "off_hint"); return; }
+  if (!built) { built = true; applyLang((s.settings && s.settings.lang) || "en"); }
+  render(s);
+}
+
+applyLang("en");
+post("/api/check-update").catch(() => {}).finally(() => setTimeout(refresh, 1500));
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>

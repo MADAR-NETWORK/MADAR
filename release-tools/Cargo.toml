@@ -1,0 +1,20 @@
+[package]
+name = "madar-release-tools"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "MADAR Network — offline release-signing key generation and manifest signing tools (D35). Never run these against a networked machine with the production key present."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+madar-keystore = { path = "../keystore" }
+madar-update = { path = "../update" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rpassword = "7"
+hex = "0.4"
+zeroize = "1"
+
+[lints.rust]
+unsafe_code = "deny"

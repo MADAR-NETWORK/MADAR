@@ -1,0 +1,91 @@
+# Quality and security gates. **No secrets and no keys** (D35 stays outside CI). Permissions: read contents only. Every action is pinned to a full SHA.
+# Enforcement: the main branch is protected by the `ci-gate` status check — this file alone does not block merging.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+permissions: {}
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_AUDIT_VERSION: "0.22.2"
+  CARGO_DENY_VERSION: "0.20.2"
+
+jobs:
+  policy:
+    name: policy (secrets, build env, licenses/bans/sources, advisories)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libclang-dev clang libssl-dev pkg-config
+      - name: toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - name: install audit tools (pinned versions, --locked)
+        run: cargo install --locked cargo-audit@${CARGO_AUDIT_VERSION} cargo-deny@${CARGO_DENY_VERSION}
+      - name: secret scan (all tracked files) + scanner self-test
+        run: |
+          bash scripts/check-no-secrets.sh --all
+          bash scripts/test-check-no-secrets.sh
+      - name: build environment matches the pins
+        run: bash scripts/verify-build-env.sh
+      - name: cargo deny (bans, licenses, sources)
+        run: cargo deny check bans licenses sources
+      - name: advisories (fails on any undocumented advisory)
+        run: bash scripts/check-advisories.sh
+      - name: gates fail when they should
+        run: bash scripts/test-ci-gates.sh
+      - name: Cargo.lock change report (informational, never fails)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/lock-diff-report.sh "origin/${{ github.base_ref }}" HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+
+  test-linux:
+    name: tests (linux, full workspace incl. node)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libclang-dev clang libssl-dev pkg-config
+      - name: toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - run: cargo test --locked --workspace
+
+  test-windows:
+    name: tests (windows, workspace without node)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain
+      # madar-node on Windows needs LLVM/OpenSSL at local paths and is verified locally; the node is tested on Linux.
+      - run: cargo test --locked --workspace --exclude madar-node
+
+  ci-gate:
+    name: ci-gate
+    if: always()
+    needs: [policy, test-linux, test-windows]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: every required job must have succeeded
+        run: |
+          echo "policy=${{ needs.policy.result }} test-linux=${{ needs.test-linux.result }} test-windows=${{ needs.test-windows.result }}"
+          [ "${{ needs.policy.result }}" = "success" ] && [ "${{ needs.test-linux.result }}" = "success" ] && [ "${{ needs.test-windows.result }}" = "success" ]

@@ -1,0 +1,19 @@
+[package]
+name = "madar-committee-tools"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "MADAR Network — offline generation of D44 Runtime Upgrade Committee account keys (sr25519, on-chain AccountIds). Distinct key space from D35 release-signing keys (Ed25519, off-chain) — do not mix. Run only on an air-gapped machine."
+
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+madar-keystore = { path = "../keystore" }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+rpassword = "7"
+hex = "0.4"
+zeroize = "1"
+
+[lints.rust]
+unsafe_code = "deny"

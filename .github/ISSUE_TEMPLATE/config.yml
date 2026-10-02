@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/MADAR-NETWORK/madar/security/policy
+    about: Email contact@madar-network.com with SECURITY in the subject. Never open a public issue for vulnerabilities.
+  - name: Community chat (Telegram)
+    url: https://t.me/madarnetwork
+    about: Questions and general discussion.

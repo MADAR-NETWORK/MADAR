@@ -1,0 +1,35 @@
+MADAR Network
+Copyright (c) 2026 MADAR Network contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+---
+
+Third-party licensing notice (`node/` only)
+--------------------------------------------
+
+The `madar-node` binary links against components from the Substrate /
+Polkadot SDK client stack (crate names prefixed `sc-*`, e.g. `sc-cli`,
+`sc-service`, `sc-network`, `sc-executor`, `sc-consensus-babe`), which are
+licensed under the GNU General Public License v3.0 or later, WITH the
+Classpath exception ("GPL-3.0-or-later WITH Classpath-exception-2.0").
+
+The Classpath exception permits code that merely links against
+GPL-licensed libraries (without modifying them) to remain under its own
+license. Accordingly, all MADAR Network source code in this repository —
+including `protocol/`, `identity/`, `transactions/`, `ledger/`, `blocks/`,
+`consensus/`, `admission/`, and `node/` itself — remains licensed solely
+under Apache-2.0, as stated in each crate's `Cargo.toml`.
+
+The `sc-*` components themselves are unmodified from the pinned
+`polkadot-sdk` tag (see `Cargo.toml` files for the exact git tag), and
+their full source is publicly available at
+https://github.com/paritytech/polkadot-sdk under the same tag.
+
+See `docs/security/node-licensing.md` for the complete explanation of this
+structure, including distribution obligations for the compiled
+`madar-node` binary.

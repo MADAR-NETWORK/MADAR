@@ -1,0 +1,4 @@
+# Line endings: shell scripts and the lock file always use LF (with core.autocrlf=true on Windows they were checked out as CRLF, breaking bash and showing Cargo.lock as modified).
+*.sh text eol=lf
+Cargo.lock text eol=lf
+rust-toolchain.toml text eol=lf

@@ -1,0 +1,32 @@
+[workspace]
+exclude = ["live-tests"]
+resolver = "2"
+members = [
+    "upgrade-authority",
+    "stamp",
+    "committee-tools",
+    "protocol",
+    "identity",
+    "transactions",
+    "ledger",
+    "blocks",
+    "consensus",
+    "admission",
+    "admission-api",
+    "node",
+    "keystore",
+    "update",
+    "node-app",
+    "installer",
+    "release-tools",
+]
+
+# Note (§22 Polkadot SDK Dependency Strategy):
+# there is no unified version pinning for all crates.io crates via [workspace.dependencies] yet,
+# because the reference Polkadot SDK version had not been confirmed — see
+# the internal design document §11.3 before the first real build.
+
+
+# Runtime tests run the real Argon2id (19 MiB): optimizing this one package in dev keeps them practical.
+[profile.dev.package.argon2]
+opt-level = 3

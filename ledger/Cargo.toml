@@ -1,0 +1,33 @@
+[package]
+name = "madar-ledger"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "MADAR Network — State/Ledger phase: bounded-storage pattern (D22 state-bloat protection) on top of frame_system's account model. No balances/currency yet (D21) — Token-ready by design (D38)."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+parity-scale-codec = { version = "3.6.12", features = ["derive"], default-features = false }
+scale-info = { version = "2.11.3", features = ["derive"], default-features = false }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+
+[dev-dependencies]
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+sp-io = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+madar-identity = { path = "../identity" }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "sp-runtime/std",
+    "frame-system/std",
+    "frame-support/std",
+]

@@ -1,0 +1,16 @@
+[package]
+name = "madar-setup"
+version = "2.0.2"
+edition = "2021"
+description = "MADAR Node 2.0 installer for Windows: single exe, no admin, desktop shortcut, in-place update that keeps data."
+license = "Apache-2.0"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "madar-setup"
+path = "src/main.rs"
+
+[dependencies]
+miniz_oxide = "0.8"
+sha2 = "0.10"

@@ -1,0 +1,60 @@
+[package]
+name = "madar-protocol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "MADAR Network — Protocol Specification primitives (Chain ID, Genesis fields, Network Prefix, Domain separation tags). No custom crypto: consumes sp-core/sp-runtime directly."
+license = "Apache-2.0"
+publish = false
+
+# ============================================================================
+# A real fix after a real failure (see the internal design document,
+# attempt of 2026-09-17): the earlier mix of independent crates.io version numbers
+# per crate (sp-core 34.0.0 / sp-runtime 37.0.0 / frame-system 36.0.0 /
+# frame-support 36.0.0 ...) produced E0433 (`try_runtime_enabled` missing in
+# frame_support) because those numbers were never published together as a compatible set —
+# crates.io publication of Polkadot SDK components does not guarantee compatibility between numbers picked by hand
+# from different crates.
+#
+# The fix: pin every crate derived from the Polkadot SDK (sp-*, frame-*) via Git to
+# exactly the same tag of the polkadot-sdk repository — this guarantees compatibility by construction
+# (all from the same commit), instead of guessing scattered crates.io numbers.
+#
+# **Update (D40/D41, 2026-09-18):** the pin was upgraded from `polkadot-stable2409` to
+# `polkadot-stable2606-2` — the latest actual stable production release (not a release
+# candidate; verified with `git ls-remote --tags` on the real machine). Reason: it turned out
+# that `stable2409` cannot produce compilable WASM with any recent Rust toolchain
+# (see the internal design document and D40 in the decision
+# log). The full details of this upgrade (isolated test, breaking APIs, re-running
+# audit/deny) are documented in the internal design document
+# attempt 2 (D41).
+# ============================================================================
+
+[dependencies]
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+sp-crypto-hashing = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+parity-scale-codec = { version = "3.6.12", features = ["derive"], default-features = false }
+scale-info = { version = "2.11.3", features = ["derive"], default-features = false }
+blake2 = { version = "0.10.6", default-features = false }
+
+[dev-dependencies]
+hex = "0.4.3"
+sp-io = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+sp-keyring = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "sp-crypto-hashing/std",
+    "blake2/std",
+]

@@ -1,0 +1,42 @@
+[package]
+name = "madar-admission"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "MADAR Network — Admission/Sybil Resistance: Argon2id memory-hard puzzle (D26), flat weight (D6), SessionManager replacing the Consensus-phase () stub. Not final difficulty/cap numbers (D27/D28) — placeholders pending benchmark."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+parity-scale-codec = { version = "3.6.12", features = ["derive"], default-features = false }
+scale-info = { version = "2.11.3", features = ["derive"], default-features = false }
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+sp-staking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+pallet-session = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false, features = ["historical"] }
+madar-protocol = { path = "../protocol", default-features = false }
+
+[dev-dependencies]
+sp-io = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+madar-identity = { path = "../identity" }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "argon2/std",
+    "sp-core/std",
+    "sp-staking/std",
+    "sp-runtime/std",
+    "frame-system/std",
+    "frame-support/std",
+    "pallet-session/std",
+    "madar-protocol/std",
+]
