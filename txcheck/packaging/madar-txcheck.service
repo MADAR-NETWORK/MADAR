@@ -1,0 +1,40 @@
+[Unit]
+Description=Madar TxCheck — read transactions before they are signed
+Documentation=https://madar-network.com/txcheck/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=madar-txcheck
+Group=madar-txcheck
+ExecStart=/usr/local/bin/madar-txcheck serve /etc/madar-txcheck/madar-txcheck.toml
+WorkingDirectory=/var/lib/madar-txcheck
+StateDirectory=madar-txcheck
+StateDirectoryMode=0700
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=512M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

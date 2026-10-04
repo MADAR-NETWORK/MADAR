@@ -5264,6 +5264,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "madar-txcheck"
+version = "0.1.0"
+dependencies = [
+ "blake2 0.10.6",
+ "bs58",
+ "ed25519-dalek",
+ "frame-metadata",
+ "getrandom 0.2.17",
+ "hex",
+ "parity-scale-codec",
+ "scale-info",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
 name = "madar-update"
 version = "0.1.0"
 dependencies = [
