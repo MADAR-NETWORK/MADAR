@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Madar Ops</title>
+<style>
+  :root { --bg:#030407; --panel:#0a0e17; --line:rgba(110,140,220,.2); --text:#eef3fc; --muted:#8e9ab0; --ok:#34d399; --warn:#fbbf24; --bad:#f87171; --blue:#3d7bff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background: radial-gradient(900px 400px at 50% -10%, rgba(61,123,255,.18), transparent 60%), var(--bg); color:var(--text); font: 15px/1.55 "Segoe UI", system-ui, sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 18px 40px; }
+  header { display:flex; justify-content:space-between; align-items:center; }
+  h1 { margin:0; font-size:22px; } h1 span { color: var(--blue); }
+  .muted { color: var(--muted); font-size: 13px; }
+  .banner { margin: 18px 0; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel); font-weight: 600; }
+  .banner.ok { border-color: rgba(52,211,153,.45); color: var(--ok); }
+  .banner.bad { border-color: rgba(248,113,113,.5); color: var(--bad); }
+  .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap: 12px; }
+  .card { background: var(--panel); border:1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .card h3 { margin:0 0 8px; font-size: 16px; display:flex; align-items:center; gap:8px; }
+  .dot { width:10px; height:10px; border-radius:50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .kv { display:grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-size: 14px; }
+  .kv b { font-variant-numeric: tabular-nums; }
+  .issue { padding: 10px 12px; border-radius: 10px; margin-top: 8px; background: rgba(248,113,113,.08); border: 1px solid rgba(248,113,113,.3); }
+  .issue.warning { background: rgba(251,191,36,.08); border-color: rgba(251,191,36,.3); }
+  .issue b { display:block; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>Madar <span>Ops</span></h1><div class="muted" id="when">loading…</div></header>
+  <div class="banner" id="banner">…</div>
+  <div id="issues"></div>
+  <h2 style="font-size:16px;margin:22px 0 10px">Nodes</h2>
+  <div class="grid" id="nodes"></div>
+  <p class="muted" id="foot"></p>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt !== undefined) e.textContent = txt; return e; };
+async function tick() {
+  let s;
+  try { s = await (await fetch("/status.json", { cache: "no-store" })).json(); } catch { $("when").textContent = "madar-ops is not answering"; return; }
+  $("when").textContent = s.checked_at ? "checked " + Math.max(0, Math.round(Date.now() / 1000 - s.checked_at)) + " s ago" : "first check running…";
+  const n = s.open_issues.length;
+  $("banner").className = "banner " + (n ? "bad" : "ok");
+  $("banner").textContent = n ? n + " open issue" + (n > 1 ? "s" : "") : "All nodes healthy";
+  const iss = $("issues"); iss.replaceChildren();
+  s.open_issues.forEach((i) => { const d = el("div", "issue " + i.severity); d.append(el("b", null, i.title), el("span", "muted", i.detail)); iss.append(d); });
+  const grid = $("nodes"); grid.replaceChildren();
+  Object.entries(s.nodes).forEach(([name, m]) => {
+    const p = m.last || {}; const c = el("div", "card"); const h = el("h3"); h.append(el("span", "dot " + (p.ok ? "ok" : "bad")), el("span", null, name)); c.append(h);
+    const kv = el("div", "kv");
+    const row = (k, v) => { kv.append(el("span", "muted", k), el("b", null, v == null ? "—" : String(v))); };
+    if (p.ok) { row("best block", "#" + p.best); row("finalized", "#" + p.finalized + "  (" + (p.best - p.finalized) + " behind)"); row("peers", p.peers); row("syncing", p.syncing ? "yes" : "no"); row("chain", p.chain); row("version", p.version); }
+    else { row("error", p.error || "no answer"); row("failed checks", m.failures); }
+    c.append(kv); grid.append(c);
+  });
+  $("foot").textContent = (s.disk_free_pct != null ? "disk free " + s.disk_free_pct.toFixed(1) + "% · " : "") + (s.last_delivery.length ? "last alert: " + s.last_delivery.join(", ") : "no alerts sent yet");
+}
+tick(); setInterval(tick, 5000);
+</script>
+</body>
+</html>

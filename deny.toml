@@ -137,7 +137,8 @@ exceptions = [
     # that imposes no obligation on our code. See D40/D41.
     { allow = ["MPL-2.0"], crate = "option-ext" },
     # `webpki-roots` 0.25.4 (MPL-2.0, a copy of the root certificates; via libp2p-websocket in a libp2p backend that is rejected at startup): file-level copyleft; we do not modify it and it imposes no obligation on our code.
-    { allow = ["MPL-2.0"], crate = "webpki-roots" },
+    # Newer `webpki-roots` (0.26 / 1.x, via ureq in madar-ops for https alerts) are CDLA-Permissive-2.0: a fully permissive data license for the CA list (no copyleft).
+    { allow = ["MPL-2.0", "CDLA-Permissive-2.0"], crate = "webpki-roots" },
     # The `sc-*` client components of polkadot-sdk: GPL-3.0-or-later WITH Classpath-exception-2.0 — their original license, with no alternative Substrate client; documented and approved in
     # docs/security/node-licensing.md (D42): our code stays Apache-2.0 thanks to the exception. Restricted by package name (the license is not added to the global allow list).
     { allow = ["GPL-3.0-or-later WITH Classpath-exception-2.0"], crate = "sc-basic-authorship" },

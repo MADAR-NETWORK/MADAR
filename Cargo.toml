@@ -19,6 +19,7 @@ members = [
     "node-app",
     "installer",
     "release-tools",
+    "ops",
 ]
 
 # Note (§22 Polkadot SDK Dependency Strategy):

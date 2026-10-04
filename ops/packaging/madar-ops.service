@@ -1,0 +1,30 @@
+[Unit]
+Description=Madar Ops — node monitoring and alerts
+Documentation=https://madar-network.com/ops/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=madar-ops
+Group=madar-ops
+ExecStart=/usr/local/bin/madar-ops run /etc/madar-ops/madar-ops.toml
+Restart=always
+RestartSec=10
+# read-only watcher: no writes outside its own state, no privileges
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
