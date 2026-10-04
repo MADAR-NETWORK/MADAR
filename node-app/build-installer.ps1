@@ -38,6 +38,7 @@ MADAR Node $version
 platform: windows-x64 (Windows 10/11)
 role: full (non-voting)
 bootnode: /ip4/188.241.241.253/tcp/30333/p2p/12D3KooWDAr7FDtAeUx51zowWytNKeeuQfB5B2cyF4bZmDEp9j9K
+bootnode: /ip4/188.241.241.234/tcp/30333/p2p/12D3KooWPf6Vv7PPZ9DUeeNZ3YA43pZRAsDaty25KQJ7wGTCLZW4
 built: $((Get-Date).ToString('yyyy-MM-dd HH:mm zzz'))
 madar-spec.json sha256: $spec
 madar-node.exe sha256: $node

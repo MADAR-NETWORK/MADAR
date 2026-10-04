@@ -5013,7 +5013,7 @@ dependencies = [
 
 [[package]]
 name = "madar-app"
-version = "2.0.6"
+version = "2.0.8"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",

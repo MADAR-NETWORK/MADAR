@@ -1,6 +1,6 @@
 [package]
 name = "madar-app"
-version = "2.0.6"
+version = "2.0.8"
 edition = "2021"
 description = "MADAR Node 2.0 for Windows: local account + status page, tray icon, gentle full node, signed updates."
 license = "Apache-2.0"

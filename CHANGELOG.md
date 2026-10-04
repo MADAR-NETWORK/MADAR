@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Desktop node app 2.0.8: the second gateway now points to the current backup entry point (the retired server was removed), and the installer's `VERSION` file lists both gateways.
+- Desktop node app 2.0.8: a new "Stuck" state appears after 10 minutes without a new block (or while still at block 0). The page lists likely causes (firewall or antivirus, device clock, outdated version) and a support email link; the app keeps retrying on its own.
+
 ### Security
 - Updated `wasmtime` from 36.0.15 to 36.0.16 (RUSTSEC-2026-0316) and replaced the yanked `yoke-derive` 0.8.3 with 0.8.4.
 

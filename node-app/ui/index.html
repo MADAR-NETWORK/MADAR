@@ -56,7 +56,7 @@ header img{width:44px;height:44px;border-radius:50%;flex:none;box-shadow:0 0 18p
 .hero .state{font-size:22px;font-weight:700;margin:0 0 4px}
 .hero .sentence{color:var(--mute);margin:0 0 10px}
 .chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mute);background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:3px 10px}
-.s-running{--c:var(--good)} .s-catching_up,.s-connecting,.s-starting,.s-bootstrapping{--c:var(--warn)} .s-disconnected,.s-needs_repair{--c:var(--bad)} .s-stopped,.s-needs_account,.s-paused{--c:var(--idle)}
+.s-running{--c:var(--good)} .s-catching_up,.s-connecting,.s-starting,.s-bootstrapping{--c:var(--warn)} .s-disconnected,.s-stuck,.s-needs_repair{--c:var(--bad)} .s-stopped,.s-needs_account,.s-paused{--c:var(--idle)}
 .hero .arc{stroke:var(--c)} .hero .dot{background:var(--c);box-shadow:0 0 0 6px color-mix(in srgb,var(--c) 20%,transparent)}
 .s-running .dot{animation:pulse 2.4s ease-in-out infinite}
 @keyframes pulse{50%{box-shadow:0 0 0 11px color-mix(in srgb,var(--c) 6%,transparent)}}
@@ -99,6 +99,7 @@ footer{color:var(--mute);font-size:12px;text-align:center;margin-top:18px}
 .stats{grid-template-columns:repeat(auto-fit,minmax(96px,1fr))!important}
 .warns{margin-top:14px;display:grid;gap:8px}
 .warn{display:flex;gap:10px;align-items:flex-start;background:color-mix(in srgb,var(--warn) 12%,var(--surface));border:1px solid color-mix(in srgb,var(--warn) 35%,var(--border));border-radius:12px;padding:10px 12px;font-size:13px}
+.stuck-help ul{margin:6px 0 8px;padding-inline-start:18px;display:grid;gap:4px}.stuck-help a{color:inherit;font-weight:700}
 .warn:before{content:"!";flex:none;width:20px;height:20px;border-radius:50%;background:var(--warn);color:#fff;font-weight:700;display:grid;place-items:center;font-size:12px}
 .repair{border-color:color-mix(in srgb,var(--bad) 45%,var(--border))}
 .charts{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -309,6 +310,11 @@ Object.assign(I18N.tr, {st_paused:"Duraklatıldı",st_needs_repair:"Onarım gere
 w1_title:"MADAR'a hoş geldiniz",w1_text:"Bu uygulama bilgisayarınızda tam bir MADAR düğümü çalıştırır. Her yeni bloğu doğrular ve ağın bir kopyasını sessizce tutar.",w2_title:"Hafif ve güvenli",w2_text:"İşlemci ve belleğin küçük bir kısmını kullanır, modemde port açmaz, oy vermez ve anahtarlarınızı tutmaz.",w3_title:"Gizliliğiniz",w3_text:"Parola yok. MADAR kaydına yalnızca görünen adınız, e-postanız ve düğüm kimliğinizin son 8 karakteri gönderilir.",next:"İleri",get_started:"Başla",step:"Adım {v} / 3"});
 Object.assign(I18N.id, {st_paused:"Dijeda",st_needs_repair:"Perlu perbaikan",st_bootstrapping:"Penyiapan cepat",se_paused_battery:"Dijeda untuk menghemat baterai. Berlanjut saat pengisi daya dicolokkan.",se_paused_metered:"Dijeda pada koneksi terukur. Berlanjut di internet biasa Anda.",se_needs_repair:"Node terus berhenti. Tekan Perbaiki untuk membangun ulang data rantainya.",se_bootstrap_downloading:"Mengunduh snapshot terverifikasi agar siap dalam hitungan detik…",se_bootstrap_extracting:"Membuka snapshot…",eta:"sekitar {v} lagi",u_min:"mnt",u_sec:"dtk",stat_verified:"Blok diverifikasi",chart_title:"Satu jam terakhir",chart_blocks:"Blok / mnt",chart_peers:"Peer",chart_empty:"Grafik terisi saat node berjalan.",saver:"Mode hemat",saver_hint:"Jeda node saat memakai baterai atau koneksi terukur.",repair_btn:"Perbaiki",repair_hint:"Membangun ulang data rantai. Akun dan identitas node Anda tetap tersimpan.",confirm_repair:"Perbaiki node? Data rantainya akan dibangun ulang.",warn_disk:"Ruang disk hampir habis: {v} GB tersisa. Kosongkan ruang agar node tetap berjalan.",warn_clock:"Jam Anda selisih {v} detik. Aktifkan “Atur waktu otomatis” di pengaturan Windows.",e_no_repair_needed:"Belum perlu perbaikan.",
 w1_title:"Selamat datang di MADAR",w1_text:"Aplikasi ini menjalankan node penuh MADAR di komputer Anda. Node memverifikasi setiap blok baru dan menyimpan salinan jaringan, dengan tenang.",w2_title:"Ringan dan aman",w2_text:"Hanya memakai sedikit prosesor dan memori, tidak membuka port router, tidak memberi suara, dan tidak menyimpan kunci Anda.",w3_title:"Privasi Anda",w3_text:"Tanpa kata sandi. Hanya nama tampilan, email, dan 8 karakter terakhir ID node Anda yang dikirim ke registri MADAR.",next:"Berikutnya",get_started:"Mulai",step:"Langkah {v} dari 3"});
+Object.assign(I18N.en, {"st_stuck":"Stuck","se_stuck":"No new block for 10 minutes. The app retries on its own. Common causes:","stuck_net":"Internet or firewall: make sure the app is allowed through your firewall or antivirus.","stuck_clock":"Clock: the computer time must be set automatically.","stuck_ver":"Version: install the latest version from madar-network.com.","stuck_mail":"Still stuck? Email us:"});
+Object.assign(I18N.fr, {"st_stuck":"Bloqué","se_stuck":"Aucun nouveau bloc depuis 10 minutes. L'application réessaie d'elle-même. Causes fréquentes :","stuck_net":"Internet ou pare-feu : autorisez l'application dans votre pare-feu ou antivirus.","stuck_clock":"Horloge : l'heure de l'ordinateur doit être réglée automatiquement.","stuck_ver":"Version : installez la dernière version depuis madar-network.com.","stuck_mail":"Toujours bloqué ? Écrivez-nous :"});
+Object.assign(I18N.es, {"st_stuck":"Atascado","se_stuck":"Ningún bloque nuevo en 10 minutos. La aplicación reintenta sola. Causas comunes:","stuck_net":"Internet o cortafuegos: permite la aplicación en tu cortafuegos o antivirus.","stuck_clock":"Reloj: la hora del equipo debe ajustarse automáticamente.","stuck_ver":"Versión: instala la última versión desde madar-network.com.","stuck_mail":"¿Sigue atascado? Escríbenos:"});
+Object.assign(I18N.tr, {"st_stuck":"Takıldı","se_stuck":"10 dakikadır yeni blok yok. Uygulama kendiliğinden yeniden dener. Sık nedenler:","stuck_net":"İnternet veya güvenlik duvarı: uygulamaya güvenlik duvarında veya antivirüste izin verin.","stuck_clock":"Saat: bilgisayar saati otomatik ayarlanmalı.","stuck_ver":"Sürüm: madar-network.com adresinden en son sürümü kurun.","stuck_mail":"Hâlâ takılı mı? Bize e-posta gönderin:"});
+Object.assign(I18N.id, {"st_stuck":"Macet","se_stuck":"Tidak ada blok baru selama 10 menit. Aplikasi mencoba lagi sendiri. Penyebab umum:","stuck_net":"Internet atau firewall: izinkan aplikasi di firewall atau antivirus Anda.","stuck_clock":"Jam: waktu komputer harus diatur otomatis.","stuck_ver":"Versi: pasang versi terbaru dari madar-network.com.","stuck_mail":"Masih macet? Kirim email kepada kami:"});
 Object.assign(I18N.en, {help_title:"Help the network",help_hint:"Let other nodes connect to yours so the network is stronger. Windows may ask you to allow MADAR through the firewall. The node restarts to apply this.",report_title:"Problem report",report_hint:"Creates a file with technical logs (no email, account, keys or IP addresses) and opens an email to MADAR support.",report_btn:"Send a problem report",report_done:"The report file was created:\n{v}\n\nAttach it to the email that just opened and send it.",e_report_failed:"The report could not be created."});
 Object.assign(I18N.fr, {help_title:"Aider le réseau",help_hint:"Laissez d'autres nœuds se connecter au vôtre pour renforcer le réseau. Windows peut vous demander d'autoriser MADAR dans le pare-feu. Le nœud redémarre pour l'appliquer.",report_title:"Signaler un problème",report_hint:"Crée un fichier de journaux techniques (sans e-mail, compte, clés ni adresses IP) et ouvre un e-mail au support MADAR.",report_btn:"Envoyer un rapport",report_done:"Le fichier de rapport a été créé :\n{v}\n\nJoignez-le à l'e-mail qui vient de s'ouvrir, puis envoyez-le.",e_report_failed:"Impossible de créer le rapport."});
 Object.assign(I18N.es, {help_title:"Ayudar a la red",help_hint:"Permite que otros nodos se conecten al tuyo para fortalecer la red. Windows puede pedirte permitir MADAR en el firewall. El nodo se reinicia para aplicarlo.",report_title:"Informe de problema",report_hint:"Crea un archivo con registros técnicos (sin correo, cuenta, claves ni direcciones IP) y abre un correo al soporte de MADAR.",report_btn:"Enviar un informe",report_done:"Se creó el archivo del informe:\n{v}\n\nAdjúntalo al correo que se acaba de abrir y envíalo.",e_report_failed:"No se pudo crear el informe."});
@@ -476,13 +482,24 @@ function renderHero(s) {
   const h = s.health || {};
   if (h.disk_low) warns.push(t("warn_disk", nf(h.disk_free_gb)));
   if (h.clock_bad) warns.push(t("warn_clock", nf(Math.round(Math.abs(h.clock_offset_s)))));
-  $("warns").replaceChildren(...warns.map(w => { const d = document.createElement("div"); d.className = "warn"; d.textContent = w; return d; }));
+  const nodes = warns.map(w => { const d = document.createElement("div"); d.className = "warn"; d.textContent = w; return d; });
+  // Stuck: likely causes + support email (email only).
+  if (s.state === "stuck") {
+    const d = document.createElement("div"); d.className = "warn stuck-help";
+    const box = document.createElement("div");
+    const ul = document.createElement("ul");
+    ["stuck_net", "stuck_clock", "stuck_ver"].forEach(k => { const li = document.createElement("li"); li.textContent = t(k); ul.appendChild(li); });
+    const mail = document.createElement("div"); mail.textContent = t("stuck_mail") + " ";
+    const a = document.createElement("a"); a.href = "mailto:contact@madar-network.com?subject=" + encodeURIComponent("MADAR node stuck (" + s.version + ")"); a.textContent = "contact@madar-network.com";
+    mail.appendChild(a); box.append(ul, mail); d.appendChild(box); nodes.push(d);
+  }
+  $("warns").replaceChildren(...nodes);
   const pct = s.sync ? Math.min(100, Math.max(0, s.sync.percent)) : null;
   let frac = 0, big = "", small = "", dot = false;
   if (s.state === "running") { frac = 1; big = "✓"; small = t("synced"); }
   else if (s.state === "catching_up" && pct != null) { frac = pct / 100; big = nf(Math.floor(pct)) + "%"; small = t("synced"); }
   else if (s.state === "connecting" || s.state === "starting" || s.state === "bootstrapping") { frac = .15; dot = true; }
-  else if (s.state === "disconnected") { frac = pct != null ? pct / 100 : 1; dot = true; }
+  else if (s.state === "disconnected" || s.state === "stuck") { frac = pct != null ? pct / 100 : 1; dot = true; }
   else { dot = true; }
   $("arc").style.strokeDashoffset = String(ARC * (1 - frac));
   $("ring-big").textContent = big; $("ring-small").textContent = small;

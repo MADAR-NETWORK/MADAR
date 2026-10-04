@@ -69,12 +69,14 @@ pub fn signature_ok_with(v: &Value, pubkey_hex: &str) -> bool {
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// The only gateway: the primary server (full node, non-voting).
+/// First gateway: the primary server (full node, non-voting).
 const BOOTNODE: &str =
     "/ip4/188.241.241.253/tcp/30333/p2p/12D3KooWDAr7FDtAeUx51zowWytNKeeuQfB5B2cyF4bZmDEp9j9K";
-/// Backup server: a second gateway at a different hosting provider; if the primary fails, the node connects through it automatically.
+/// Second gateway: if the first one is unreachable, the node still joins the network through it.
 const BOOTNODE_BACKUP: &str =
-    "/ip4/103.254.60.222/tcp/30333/p2p/12D3KooWQqcRoYDfHLGrj7kUcNFQHnHvpcgZvKMfU1RuPRqnhuXS";
+    "/ip4/188.241.241.234/tcp/30333/p2p/12D3KooWPf6Vv7PPZ9DUeeNZ3YA43pZRAsDaty25KQJ7wGTCLZW4";
+/// After this long without a new block the page shows likely causes and the support email.
+const STUCK_AFTER: Duration = Duration::from_secs(600);
 const GENESIS: &str = "0xec491025ce422aebac0a5e20fb4c868bb3dacefe56cb051060492ceedd6f5e5c";
 const UI_PORT: u16 = 17766;
 const RPC_PORT: u16 = 9966;
@@ -1036,6 +1038,10 @@ struct State {
     last_self_heal: Option<Instant>,
 }
 
+pub fn is_stuck(uptime: Duration, best_unchanged: Duration) -> bool {
+    uptime >= STUCK_AFTER && best_unchanged >= STUCK_AFTER
+}
+
 /// Stuck guard (pure, tested): a node running for at least 10 minutes whose **finality has been stuck for 10 minutes while its head advances** (gap >= 40 blocks),
 /// or that has had **no peers for 10 minutes** => restarted once, and no more than once every 30 minutes. (Incident 2026-09-28: the device clock drifted 9 seconds, so the node got stuck
 /// in an old voting round and its finality stayed stuck for hours until it was restarted manually.)
@@ -1356,6 +1362,9 @@ fn status_json(p: &Paths, st: &mut State) -> Value {
         "stopped"
     } else if health.is_none() {
         "starting"
+    } else if is_stuck(st.node_started.elapsed(), st.last_best_change.elapsed()) {
+        // No new block for 10 minutes (or still at block 0): the page shows likely causes and the support email.
+        "stuck"
     } else if peers == Some(0) && st.node_started.elapsed() < Duration::from_secs(90) {
         "connecting"
     } else if peers == Some(0) || stalled {
@@ -1650,6 +1659,7 @@ fn tray_texts(state: &str, best: Option<u64>, peers: Option<u64>, _lang: &str) -
         "catching_up" => "Catching up",
         "connecting" | "starting" => "Starting",
         "disconnected" => "Disconnected",
+        "stuck" => "Stuck",
         "paused" => "Paused (saver mode)",
         "needs_repair" => "Needs repair",
         "bootstrapping" => "Fast setup",
@@ -2460,6 +2470,15 @@ fn handle(mut s: TcpStream, state: &Arc<Mutex<State>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stuck_only_after_ten_minutes_without_a_new_block() {
+        let m = |x: u64| Duration::from_secs(x * 60);
+        assert!(!is_stuck(m(5), m(5)));
+        assert!(!is_stuck(m(30), m(9)));
+        assert!(is_stuck(m(10), m(10)));
+        assert!(is_stuck(m(60), m(12)));
+    }
 
     #[test]
     fn a_stuck_or_isolated_node_is_restarted_but_not_too_early_or_too_often() {
