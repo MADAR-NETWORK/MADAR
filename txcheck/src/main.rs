@@ -14,10 +14,11 @@ mod ss58;
 
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub fn now() -> u64 {
@@ -37,6 +38,10 @@ struct Config {
     /// Use the community scam-site / scam-address lists (downloaded from GitHub, refreshed every 6 h).
     #[serde(default = "d_true")]
     phishing_lists: bool,
+    /// Optional file with one IP per line whose requests are not counted in the usage totals
+    /// (e.g. the operator's own tests). Re-read every minute. Requires the proxy to send X-Real-IP.
+    #[serde(default)]
+    exclude_ips_file: Option<String>,
     #[serde(rename = "chain", default)]
     chains: Vec<chains::ChainCfg>,
 }
@@ -138,18 +143,64 @@ struct App {
     chains: chains::Chains,
     phishing: phishing::Phishing,
     key: SigningKey,
+    /// Aggregate counts only (UTC day -> [ok, caution, danger]); nothing about the requests themselves.
+    usage: Mutex<BTreeMap<String, [u64; 3]>>,
+    exclude_file: Option<String>,
+    /// (loaded at, IPs) — refreshed from exclude_file at most once a minute
+    excluded: Mutex<(u64, std::collections::HashSet<String>)>,
+}
+
+/// UTC calendar day for a unix time (no date library needed).
+fn utc_day(t: u64) -> String {
+    let z = (t / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 impl App {
-    fn verdict(&self, req: &rules::Request) -> serde_json::Value {
+    fn is_excluded(&self, ip: &str) -> bool {
+        let Some(path) = &self.exclude_file else {
+            return false;
+        };
+        let mut ex = self.excluded.lock().unwrap();
+        if now().saturating_sub(ex.0) >= 60 {
+            ex.1 = std::fs::read_to_string(path)
+                .map(|t| {
+                    t.lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ex.0 = now();
+        }
+        ex.1.contains(ip)
+    }
+
+    fn verdict(&self, req: &rules::Request, count: bool) -> serde_json::Value {
         let o = rules::check(req, &self.chains, &self.phishing);
+        if count {
+            let mut u = self.usage.lock().unwrap();
+            u.entry(utc_day(now())).or_default()[o.verdict as usize] += 1;
+            while u.len() > 3 {
+                let first = u.keys().next().cloned().unwrap();
+                u.remove(&first);
+            }
+        }
         let ar = req.lang.as_deref() == Some("ar");
         let (v, headline) = match o.verdict {
             rules::Level::Danger => ("danger", if ar { "لا توقّع" } else { "Do not sign" }),
             rules::Level::Caution => (
                 "caution",
                 if ar {
-                    "تحقّق جيدًا قبل التوقيع"
+                    "تحقّق جيدا قبل التوقيع"
                 } else {
                     "Check carefully before signing"
                 },
@@ -240,7 +291,20 @@ fn handle(app: &App, mut s: TcpStream) {
     match (method, path) {
         ("OPTIONS", _) => respond(&mut s, 204, "", None),
         ("GET", "/v1/health") => {
-            let body = serde_json::json!({"ok": true, "engine": concat!("madar-txcheck ", env!("CARGO_PKG_VERSION")), "key": app.key_hex(), "chains": app.chains.names(), "phishing": app.phishing.stats()}).to_string();
+            let mut h = serde_json::json!({"ok": true, "engine": concat!("madar-txcheck ", env!("CARGO_PKG_VERSION")), "key": app.key_hex(), "chains": app.chains.names(), "phishing": app.phishing.stats()});
+            // Usage totals only for a direct local caller (the operator's own tools), never through the public proxy.
+            let direct_local = s.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false) && header("x-real-ip").is_none();
+            if direct_local {
+                h["usage"] = app
+                    .usage
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(d, c)| (d.clone(), serde_json::json!({"ok": c[0], "caution": c[1], "danger": c[2]})))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into();
+            }
+            let body = h.to_string();
             respond(&mut s, 200, &body, None)
         },
         ("GET", "/v1/key") => respond(&mut s, 200, &serde_json::json!({"key": app.key_hex(), "scheme": "ed25519", "signs": "the exact bytes of every /v1/check response body"}).to_string(), None),
@@ -269,7 +333,9 @@ fn handle(app: &App, mut s: TcpStream) {
             if req.payload.is_none() && req.call.is_none() && req.raw.is_none() && req.origin.is_none() {
                 return respond(&mut s, 400, r#"{"error":"send one of: payload, call, raw, origin"}"#, None);
             }
-            let out = app.verdict(&req).to_string();
+            let peer_local = s.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
+            let client = if peer_local { header("x-real-ip").unwrap_or_default() } else { s.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default() };
+            let out = app.verdict(&req, !app.is_excluded(&client)).to_string();
             let sig = format!("0x{}", hex::encode(app.key.sign(out.as_bytes()).to_bytes()));
             respond(&mut s, 200, &out, Some((&sig, &app.key_hex())))
         },
@@ -283,6 +349,9 @@ fn serve(cfg: Config) {
         chains: chains::Chains::new(cfg.chains),
         phishing: phishing::Phishing::new(cfg.phishing_lists),
         key: signing_key(&cfg.key_file),
+        usage: Mutex::default(),
+        exclude_file: cfg.exclude_ips_file.clone(),
+        excluded: Mutex::default(),
     });
     eprintln!("verdict signing key: {}", app.key_hex());
     {
@@ -361,13 +430,13 @@ fn main() {
                 eprintln!("bad request: {e}");
                 std::process::exit(2)
             });
-            let app = App { chains: chains::Chains::new(cfg.chains), phishing: phishing::Phishing::new(cfg.phishing_lists), key: SigningKey::from_bytes(&[7; 32]) };
+            let app = App { chains: chains::Chains::new(cfg.chains), phishing: phishing::Phishing::new(cfg.phishing_lists), key: SigningKey::from_bytes(&[7; 32]), usage: Mutex::default(), exclude_file: None, excluded: Mutex::default() };
             if app.phishing.enabled {
                 if let Err(e) = app.phishing.refresh() {
                     eprintln!("scam lists not loaded: {e}");
                 }
             }
-            println!("{}", serde_json::to_string_pretty(&app.verdict(&req)).unwrap());
+            println!("{}", serde_json::to_string_pretty(&app.verdict(&req, false)).unwrap());
         },
         "serve" => serve(load(args.get(2).map(String::as_str).unwrap_or("madar-txcheck.toml"))),
         "--version" | "version" => println!("madar-txcheck {}", env!("CARGO_PKG_VERSION")),
@@ -375,5 +444,15 @@ fn main() {
             "Madar TxCheck {} — read a transaction before you sign it\n\n  madar-txcheck init [config]                  create madar-txcheck.toml\n  madar-txcheck check <request.json|-> [config] check one request\n  madar-txcheck serve [config]                 HTTP API: POST /v1/check\n\nhttps://madar-network.com/txcheck/",
             env!("CARGO_PKG_VERSION")
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn utc_days() {
+        assert_eq!(super::utc_day(0), "1970-01-01");
+        assert_eq!(super::utc_day(1_791_131_349), "2026-10-04");
+        assert_eq!(super::utc_day(951_782_400), "2000-02-29");
     }
 }

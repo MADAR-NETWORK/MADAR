@@ -204,7 +204,7 @@ pub fn check(req: &Request, chains: &Chains, phishing: &Phishing) -> Outcome {
                         Level::Caution,
                         "PUNYCODE_SITE",
                         format!("{host} uses look-alike international characters in its name."),
-                        format!("اسم الموقع {host} يستخدم حروفًا دولية قد تشبه حروفًا أخرى."),
+                        format!("اسم الموقع {host} يستخدم حروفا دولية قد تشبه حروفا أخرى."),
                     );
                 }
                 let local =
@@ -214,7 +214,7 @@ pub fn check(req: &Request, chains: &Chains, phishing: &Phishing) -> Outcome {
                         Level::Caution,
                         "INSECURE_SITE",
                         format!("{host} is not using a secure (https) connection."),
-                        format!("الموقع {host} لا يستخدم اتصالًا آمنًا (https)."),
+                        format!("الموقع {host} لا يستخدم اتصالا آمنا (https)."),
                     );
                 }
             }
@@ -289,7 +289,7 @@ pub fn check(req: &Request, chains: &Chains, phishing: &Phishing) -> Outcome {
                         .is_ok()
             });
             if looks_tx {
-                cx.flag(Level::Danger, "RAW_IS_TRANSACTION", "This “message” is really a transaction in disguise. Signing it can authorise a transfer.".into(), "هذه «الرسالة» معاملة متنكرة، وتوقيعها قد يجيز تحويلًا من حسابك.".into());
+                cx.flag(Level::Danger, "RAW_IS_TRANSACTION", "This “message” is really a transaction in disguise. Signing it can authorise a transfer.".into(), "هذه «الرسالة» معاملة متنكرة، وتوقيعها قد يجيز تحويلا من حسابك.".into());
             } else {
                 cx.flag(
                     Level::Caution,
@@ -310,7 +310,7 @@ pub fn check(req: &Request, chains: &Chains, phishing: &Phishing) -> Outcome {
                 "NEVER_EXPIRES",
                 "This transaction never expires: it can be submitted at any time in the future."
                     .into(),
-                "هذه المعاملة لا تنتهي صلاحيتها، ويمكن إرسالها في أي وقت مستقبلًا.".into(),
+                "هذه المعاملة لا تنتهي صلاحيتها، ويمكن إرسالها في أي وقت مستقبلا.".into(),
             );
         }
         if let (Some(tip), Some(i)) = (p.tip.as_ref().and_then(parse_num), info.as_ref()) {
@@ -497,7 +497,7 @@ fn walk(cx: &mut Ctx, c: &Call, depth: u32) {
                     format!(
                         "{to} will be able to take this asset from you later without asking again."
                     ),
-                    format!("سيتمكن {to} من أخذ هذا الأصل منك لاحقًا دون الرجوع إليك."),
+                    format!("سيتمكن {to} من أخذ هذا الأصل منك لاحقا دون الرجوع إليك."),
                 );
             }
         }
@@ -555,7 +555,7 @@ fn walk(cx: &mut Ctx, c: &Call, depth: u32) {
                 Level::Caution,
                 "SPEND_APPROVAL",
                 format!("{to} will be able to take this NFT later."),
-                format!("سيتمكن {to} من أخذ هذا الرمز لاحقًا."),
+                format!("سيتمكن {to} من أخذ هذا الرمز لاحقا."),
             );
         }
         ("Proxy", "add_proxy") => {
@@ -660,7 +660,7 @@ fn walk(cx: &mut Ctx, c: &Call, depth: u32) {
                 "ADMIN_ACTION",
                 "This is a network administrator action. Normal users never need to sign this."
                     .into(),
-                "هذا إجراء إداري للشبكة، ولا يحتاج المستخدم العادي إلى توقيعه أبدًا.".into(),
+                "هذا إجراء إداري للشبكة، ولا يحتاج المستخدم العادي إلى توقيعه أبدا.".into(),
             );
             nested(cx, f("call"), depth);
         }
@@ -776,7 +776,7 @@ fn walk(cx: &mut Ctx, c: &Call, depth: u32) {
                 "Run a raw cross-chain (XCM) program".into(),
                 "تشغيل برنامج عابر للسلاسل (XCM) خام".into(),
             );
-            cx.flag(Level::Danger, "RAW_XCM", "A raw cross-chain program can move your assets anywhere. Only sign if you fully understand it.".into(), "برنامج عابر للسلاسل خام يمكنه نقل أصولك إلى أي مكان. لا توقّع إلا إذا فهمته تمامًا.".into());
+            cx.flag(Level::Danger, "RAW_XCM", "A raw cross-chain program can move your assets anywhere. Only sign if you fully understand it.".into(), "برنامج عابر للسلاسل خام يمكنه نقل أصولك إلى أي مكان. لا توقّع إلا إذا فهمته تماما.".into());
         }
         ("PolkadotXcm" | "XcmPallet" | "XTokens", _)
             if call.contains("transfer") || call.contains("teleport") =>
@@ -793,7 +793,7 @@ fn walk(cx: &mut Ctx, c: &Call, depth: u32) {
                 "CROSS_CHAIN",
                 "Sends assets to another chain. A wrong destination is usually unrecoverable."
                     .into(),
-                "ترسل أصولًا إلى سلسلة أخرى، والخطأ في الوجهة غالبًا لا يمكن تداركه.".into(),
+                "ترسل أصولا إلى سلسلة أخرى، والخطأ في الوجهة غالبا لا يمكن تداركه.".into(),
             );
         }
         _ => cx.act(
@@ -834,7 +834,7 @@ fn admin(cx: &mut Ctx, c: &Call) {
         Level::Danger,
         "ADMIN_ACTION",
         "This is a network administrator action. Normal users never need to sign this.".into(),
-        "هذا إجراء إداري للشبكة، ولا يحتاج المستخدم العادي إلى توقيعه أبدًا.".into(),
+        "هذا إجراء إداري للشبكة، ولا يحتاج المستخدم العادي إلى توقيعه أبدا.".into(),
     );
 }
 
