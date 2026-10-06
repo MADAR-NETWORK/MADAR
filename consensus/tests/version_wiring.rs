@@ -15,7 +15,7 @@ fn frame_system_version_is_the_single_declared_runtime_version() {
         "frame_system::Config::Version must be VERSION itself"
     );
     assert_eq!(&*system_version.spec_name, "madar");
-    assert_eq!(system_version.spec_version, 6);
+    assert_eq!(system_version.spec_version, 7);
 }
 
 #[test]

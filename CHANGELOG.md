@@ -20,6 +20,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - First public release of the source code.
 - `LICENSE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `GETTING_STARTED.md`, `ROADMAP.md`, `ARCHITECTURE.md`, and issue / pull request templates.
 
+## Runtime spec 7 — Madar Names
+
+### Added
+- `names` pallet: short names (`name.madar`) bound to one EVM or Solana wallet, proved by the wallet's own signature (EVM `personal_sign` or Solana `signMessage`) and verified on-chain.
+- Each name has a yearly term followed by a grace period during which only its owner can take it back; renewal extends the term without changing the owner.
+- Registrar accounts and the reserved-name list are managed by the 2-of-3 upgrade committee. Only the committee can revoke a name, for proven fraud, with a written reason recorded publicly on-chain.
+- Safe resale: the seller signs an offer (price, receiving wallet, validity), the buyer signs an acceptance at the same price, and `lock_sale` holds the name for that buyer on-chain for at most 60 minutes. `complete_sale` moves the name once payment arrives and keeps the remaining paid term; `cancel_offer` lets the owner withdraw offers. A per-name nonce is bumped on every owner change or cancellation, so old signatures cannot be reused.
+- `madar-node names` subcommand to register, renew and read names, check signatures offline, and handle sale offers.
+
+### Changed
+- GRANDPA voting rules: voters now vote one block behind the best block instead of two, so finality trails the best block by about one block. Finality still requires more than two thirds of the voters.
+
 ## Runtime spec 6 — Madar Stamp
 
 ### Added

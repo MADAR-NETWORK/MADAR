@@ -67,6 +67,7 @@ mod genesis_config_presets;
 pub mod membership_api;
 
 pub use madar_admission;
+pub use madar_names;
 pub use madar_stamp;
 pub use pallet_babe;
 pub use pallet_grandpa;
@@ -139,14 +140,14 @@ pub mod opaque {
     pub type Block = generic::Block<Header, UncheckedExtrinsic>;
 }
 
-/// The standard execution engine — no custom execution logic (`frame_executive` as it is), with the one-time D55 migration.
+/// The standard execution engine — no custom execution logic (`frame_executive` as it is), with the one-time D55 and Madar Names migrations.
 pub type Executive = frame_executive::Executive<
     Runtime,
     Block,
     frame_system::ChainContext<Runtime>,
     Runtime,
     AllPalletsWithSystem,
-    SeedFirstStamper,
+    (SeedFirstStamper, SeedNames),
 >;
 
 /// The first account of the Madar Stamp service (D55) — the only stamper at activation. Its secret is encrypted outside the repository
@@ -178,6 +179,72 @@ impl frame_support::traits::OnRuntimeUpgrade for SeedFirstStamper {
     }
 }
 
+/// One-time Madar Names migration (spec 7): the service account itself (FIRST_STAMPER) becomes the first registrar, and the most
+/// important forbidden names are reserved on chain from the first block. The committee's approval of the upgrade code = its approval
+/// of all of this; after that any change is by 2-of-3 decision only. The full list (thousands of names and impersonation detection)
+/// lives in the registration service.
+pub struct SeedNames;
+pub const NAMES_SEEDED_KEY: &[u8] = b"madar:names:seeded";
+/// MADAR names and the most dangerous impersonation words — reserved on the chain itself.
+pub const NAMES_RESERVED_AT_LAUNCH: &[&str] = &[
+    "madar",
+    "madar-network",
+    "madarnetwork",
+    "madar-official",
+    "madarofficial",
+    "madar-team",
+    "madar-support",
+    "madarswap",
+    "madar-swap",
+    "madarstamp",
+    "madar-stamp",
+    "madarwallet",
+    "madar-wallet",
+    "madarops",
+    "madar-ops",
+    "madar-names",
+    "madarnames",
+    "madar-admin",
+    "madar-help",
+    "madar-security",
+    "admin",
+    "administrator",
+    "root",
+    "system",
+    "official",
+    "support",
+    "helpdesk",
+    "help-desk",
+    "security",
+    "verify",
+    "verification",
+    "recovery",
+    "refund",
+    "airdrop",
+    "giveaway",
+    "wallet-connect",
+    "walletconnect",
+];
+impl frame_support::traits::OnRuntimeUpgrade for SeedNames {
+    fn on_runtime_upgrade() -> Weight {
+        use frame_support::traits::Get;
+        if frame_support::storage::unhashed::exists(NAMES_SEEDED_KEY) {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
+        }
+        let _ = madar_names::Registrars::<Runtime>::try_mutate(|s| {
+            s.try_push(AccountId::from(FIRST_STAMPER))
+        });
+        for n in NAMES_RESERVED_AT_LAUNCH {
+            if let Ok(name) = madar_names::NameOf::try_from(n.as_bytes().to_vec()) {
+                madar_names::Reserved::<Runtime>::insert(name, ());
+            }
+        }
+        frame_support::storage::unhashed::put(NAMES_SEEDED_KEY, &true);
+        let n = NAMES_RESERVED_AT_LAUNCH.len() as u64;
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(2, 2 + n)
+    }
+}
+
 construct_runtime!(
     pub enum Runtime {
         System: frame_system,
@@ -192,6 +259,7 @@ construct_runtime!(
         UpgradeCommittee: pallet_collective::<Instance1>,
         UpgradeAuthority: madar_upgrade_authority,
         Stamp: madar_stamp,
+        Names: madar_names,
     }
 );
 
@@ -221,6 +289,14 @@ impl madar_transactions::AccountCreationPolicy<AccountId, RuntimeCall> for Onboa
             RuntimeCall::Stamp(madar_stamp::Call::stamp { .. }) => {
                 madar_stamp::Pallet::<Runtime>::is_stamper(who)
             }
+            // Madar Names: the approved registrar account only.
+            RuntimeCall::Names(
+                madar_names::Call::register { .. }
+                | madar_names::Call::renew { .. }
+                | madar_names::Call::lock_sale { .. }
+                | madar_names::Call::complete_sale { .. }
+                | madar_names::Call::cancel_offer { .. },
+            ) => madar_names::Pallet::<Runtime>::is_registrar(who),
             _ => false,
         }
     }
@@ -378,14 +454,14 @@ impl pallet_session::Config for Runtime {
 }
 
 /// The runtime version — the first actual version (spec version 1), no production assumption.
-/// The actual spec_version = 6 (D55: Madar Stamp; before it 5 for D54 `AdmissionCapPerRound` 5→2, 4 for closing N1, and 3 for the ban_key weight in B1). The `upgrade-fixture` feature makes it 7.
+/// The actual spec_version = 7 (Madar Names; before it 6 for D55 Madar Stamp, 5 for D54 `AdmissionCapPerRound` 5→2, 4 for closing N1, and 3 for the ban_key weight in B1). The `upgrade-fixture` feature makes it 8.
 #[cfg(not(feature = "upgrade-fixture"))]
 #[sp_version::runtime_version]
 pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: alloc::borrow::Cow::Borrowed("madar"),
     impl_name: alloc::borrow::Cow::Borrowed("madar-node"),
     authoring_version: 1,
-    spec_version: 6,
+    spec_version: 7,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -399,7 +475,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: alloc::borrow::Cow::Borrowed("madar"),
     impl_name: alloc::borrow::Cow::Borrowed("madar-node"),
     authoring_version: 1,
-    spec_version: 7,
+    spec_version: 8,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -722,6 +798,20 @@ impl madar_stamp::Config for Runtime {
     type MaxBatch = ConstU32<50>;
     type MaxStampers = ConstU32<4>;
     type WeightInfo = madar_stamp::weights::ConservativeWeight<Runtime>;
+}
+
+// Madar Names (spec 7): a yearly name bound to its owner's wallet by that wallet's signature, verified by the runtime. Registrars,
+// the reserved list and revocation for proven fraud are decided by the same upgrade committee (2-of-3).
+parameter_types! {
+    /// Longest term that can be paid in advance: 10 years.
+    pub const NamesMaxTermMs: u64 = 10 * 366 * 24 * 3600 * 1000;
+}
+impl madar_names::Config for Runtime {
+    type AdminOrigin = UpgradeApprovedOrigin;
+    type Time = Timestamp;
+    type MaxRegistrars = ConstU32<4>;
+    type MaxTermMs = NamesMaxTermMs;
+    type WeightInfo = madar_names::weights::ConservativeWeight<Runtime>;
 }
 
 /// An Admission candidate is not accepted at the lottery unless it actually registered session keys

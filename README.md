@@ -7,7 +7,8 @@ MADAR is an independent layer-1 blockchain written in Rust on the [Polkadot SDK]
 - Website: https://madar-network.com
 - Explorer: https://madar-network.com/explorer.html
 - Services: https://madar-network.com/services.html
-- Telegram: https://t.me/madarnetwork
+- Names: https://madar-network.com/names
+- Contact: contact@madar-network.com
 
 > **Status:** public testnet.
 
@@ -26,6 +27,7 @@ MADAR is an independent layer-1 blockchain written in Rust on the [Polkadot SDK]
 | Service | What it does | Code |
 |---|---|---|
 | **Madar Stamp** | Permanent proof-of-existence timestamps. Files never leave the user's device; only their SHA-256 fingerprint is recorded, and the first registration wins. A technical proof, not a legal notarization. | [`stamp/`](stamp/) |
+| **Madar Names** | Short names like ahmad.madar bound to one Ethereum-style or Solana wallet, proved by the wallet's own signature. Names can be resold safely: the name is locked for the buyer for at most 60 minutes, the buyer pays the seller directly, and the name moves once payment arrives. | [`names/`](names/) |
 | **Madar Swap** | Non-custodial token swaps at the best available rate, signed in the user's own wallet. | (web front end, not in this repository) |
 
 ## Repository layout
@@ -33,9 +35,10 @@ MADAR is an independent layer-1 blockchain written in Rust on the [Polkadot SDK]
 | Path | Contents |
 |---|---|
 | [`consensus/`](consensus/) | The runtime (chain logic) |
-| [`node/`](node/) | The `madar-node` binary: node service, operator onboarding (`join`), committee tools, `doctor` diagnostics, stamp CLI |
+| [`node/`](node/) | The `madar-node` binary: node service, operator onboarding (`join`), committee tools, `doctor` diagnostics, stamp and names CLIs |
 | [`admission/`](admission/), [`admission-api/`](admission-api/) | Operator admission and membership rules, and their read-only runtime API |
 | [`stamp/`](stamp/) | The timestamp pallet |
+| [`names/`](names/) | The names pallet (name.madar) |
 | [`upgrade-authority/`](upgrade-authority/) | 2-of-3 runtime-upgrade governance |
 | [`protocol/`](protocol/), [`identity/`](identity/), [`transactions/`](transactions/), [`ledger/`](ledger/), [`blocks/`](blocks/), [`keystore/`](keystore/) | Core protocol components |
 | [`update/`](update/), [`release-tools/`](release-tools/), [`committee-tools/`](committee-tools/) | Signed-update verification and release / committee key tools |

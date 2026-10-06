@@ -114,5 +114,5 @@ Before starting, contact the team through the channels listed in the [README](RE
 ## Need help?
 
 - Bugs and feature requests: open a GitHub issue.
-- Questions: the Telegram channel listed in the [README](README.md).
+- Questions: contact@madar-network.com (listed in the [README](README.md)).
 - Security issues: **never** in public. See [SECURITY.md](SECURITY.md).

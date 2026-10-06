@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "upgrade-authority",
     "stamp",
+    "names",
     "committee-tools",
     "protocol",
     "identity",

@@ -21,7 +21,7 @@ fn the_default_build_carries_only_production_constants() {
     assert_eq!(PUZZLE_DIFFICULTY_BITS, 13); // B2: owner decision 2026-09-28 (~5 minutes on an ordinary computer)
     assert_eq!(MIN_FRESH_ENTROPY_BLOCKS, 16);
     assert_eq!(
-        VERSION.spec_version, 6,
+        VERSION.spec_version, 7,
         "upgrade-fixture leaked into the default build"
     );
     assert_eq!(<<madar_consensus::Runtime as madar_admission::Config>::AdmissionCapPerRound as Get<u32>>::get(), 2, "D54: testnet admission cap");

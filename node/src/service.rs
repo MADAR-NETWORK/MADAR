@@ -28,6 +28,8 @@ type FullGrandpaBlockImport =
 
 /// Minimum number of blocks between imported/produced GRANDPA justifications.
 const GRANDPA_JUSTIFICATION_PERIOD: u32 = 512;
+/// How many blocks behind the best block a GRANDPA voter votes on (the default template uses 2). One block is enough margin for short forks.
+const FINALITY_MARGIN_BLOCKS: u32 = 1;
 
 pub type Service = sc_service::PartialComponents<
     FullClient,
@@ -382,7 +384,15 @@ pub fn new_full<
             network,
             sync: Arc::new(sync_service),
             notification_service: grandpa_notification_service,
-            voting_rule: sc_consensus_grandpa::VotingRulesBuilder::default().build(),
+            // Voting rule: a margin of one block behind the best (the default template uses two) — this roughly halves the time
+            // to finality (about 18 s to about 10 s with one block every 8 s) without touching safety: finality still needs
+            // more than two thirds of the voters.
+            voting_rule: sc_consensus_grandpa::VotingRulesBuilder::new()
+                .add(sc_consensus_grandpa::BeforeBestBlockBy(
+                    FINALITY_MARGIN_BLOCKS,
+                ))
+                .add(sc_consensus_grandpa::ThreeQuartersOfTheUnfinalizedChain)
+                .build(),
             prometheus_registry,
             shared_voter_state: SharedVoterState::empty(),
             telemetry: telemetry.as_ref().map(|x| x.handle()),

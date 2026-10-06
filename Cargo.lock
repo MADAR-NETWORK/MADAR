@@ -5060,6 +5060,7 @@ dependencies = [
  "madar-admission-api",
  "madar-blocks",
  "madar-identity",
+ "madar-names",
  "madar-protocol",
  "madar-stamp",
  "madar-transactions",
@@ -5120,6 +5121,20 @@ dependencies = [
  "frame-support",
  "frame-system",
  "madar-identity",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+]
+
+[[package]]
+name = "madar-names"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "madar-stamp",
  "parity-scale-codec",
  "scale-info",
  "sp-core",

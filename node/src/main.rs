@@ -10,6 +10,7 @@ mod command;
 mod committee;
 mod doctor;
 mod join;
+mod names;
 mod rpc;
 mod service;
 mod stamp;

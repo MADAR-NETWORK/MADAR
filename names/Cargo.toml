@@ -1,0 +1,35 @@
+[package]
+name = "madar-names"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "MADAR Network — Names (name.madar): yearly names bound to the owner's EVM or Solana wallet, proved by the wallet's own signature on chain. Only committee-approved registrar accounts submit; a committee-managed reserved list blocks brands and abusive names."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+madar-stamp = { path = "../stamp", default-features = false }
+parity-scale-codec = { version = "3.6.12", features = ["derive"], default-features = false }
+scale-info = { version = "2.11.3", features = ["derive"], default-features = false }
+frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+sp-io = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+
+[dev-dependencies]
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+default = ["std"]
+std = [
+    "madar-stamp/std",
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "frame-system/std",
+    "frame-support/std",
+    "sp-core/std",
+    "sp-io/std",
+]

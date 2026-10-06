@@ -157,6 +157,13 @@ pub fn run() -> sc_cli::Result<()> {
             }
             Ok(())
         }
+        Some(Subcommand::Names(cmd)) => {
+            if let Err(e) = crate::names::run(cmd.clone()) {
+                eprintln!("{}", serde_json::json!({ "error": e }));
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Some(Subcommand::Join(cmd)) => {
             // A readable message (Debug escapes non-ASCII text), and a non-zero exit code on failure.
             if let Err(e) = crate::join::run(cmd.clone()) {

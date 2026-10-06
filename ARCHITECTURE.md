@@ -9,7 +9,7 @@ This document gives a high-level map of how MADAR fits together. The precise rul
                  │                                                                        │
   peers  ◄──────►│  networking (libp2p)   BABE block authoring   GRANDPA finality   RPC   │◄──── wallets, explorer,
                  │                                                                        │      desktop app, tools
-                 │  operator tools: join · committee · stamp · doctor · check-update      │
+                 │  node tools: join · committee · stamp · names · doctor · check-update  │
                  │                                                                        │
                  │   ┌──────────────── runtime (WebAssembly, consensus/) ───────────────┐ │
                  │   │  frame_system · timestamp · balances (no endowment) · session    │ │
@@ -17,6 +17,7 @@ This document gives a high-level map of how MADAR fits together. The precise rul
                  │   │  madar_admission  (admission/)       — who may vote              │ │
                  │   │  upgrade authority (upgrade-authority/) — 2-of-3 committee       │ │
                  │   │  madar_stamp      (stamp/)           — proof-of-existence        │ │
+                 │   │  madar_names      (names/)           — name.madar names          │ │
                  │   └──────────────────────────────────────────────────────────────────┘ │
                  └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -28,6 +29,7 @@ MADAR is built on the [Polkadot SDK](https://github.com/paritytech/polkadot-sdk)
 - **BABE** produces blocks in fixed slots; **GRANDPA** finalizes them. Both are used unmodified.
 - The voter set comes from `pallet_session`, which takes its validators from `madar_admission` at each session rotation. Changes are queued and become active two rotations later, the standard Substrate behavior.
 - GRANDPA needs more than two thirds of the voters online to finalize, so voter uptime matters.
+- Voters vote one block behind the best block (the default is two), so finality trails the chain head by about one block.
 
 ## Admission: one operator, one vote
 
@@ -52,6 +54,10 @@ Calls are free. Spam resistance comes from the admission puzzle (only admitted p
 ## Madar Stamp
 
 [`stamp/`](stamp/) records SHA-256 file fingerprints permanently, first registration wins. The user signs the fingerprint with their own wallet (EVM `personal_sign` or Solana `signMessage`) and the runtime verifies that signature on-chain. Submission is limited to committee-approved stamper accounts, and files never leave the user's device.
+
+## Madar Names
+
+[`names/`](names/) binds short names (`name.madar`) to one EVM or Solana wallet. The wallet proves ownership by signing a fixed registration message, which the runtime verifies on-chain. Names have a yearly term with a grace period. Submission is limited to committee-approved registrar accounts; the reserved list and revocation for proven fraud are 2-of-3 committee decisions. Resale is handled without a middleman: a seller-signed offer and a buyer-signed acceptance let a registrar lock the name for the buyer for at most 60 minutes, and the name moves once the buyer's direct payment to the seller arrives.
 
 ## Core libraries
 

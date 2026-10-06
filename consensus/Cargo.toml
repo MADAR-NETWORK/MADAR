@@ -28,6 +28,7 @@ madar-admission = { path = "../admission", default-features = false }
 madar-admission-api = { path = "../admission-api", default-features = false }
 madar-upgrade-authority = { path = "../upgrade-authority", default-features = false }
 madar-stamp = { path = "../stamp", default-features = false }
+madar-names = { path = "../names", default-features = false }
 madar-protocol = { path = "../protocol", default-features = false }
 madar-identity = { path = "../identity", default-features = false }
 madar-transactions = { path = "../transactions", default-features = false }
@@ -83,6 +84,7 @@ std = [
     "madar-blocks/std",
     "madar-upgrade-authority/std",
     "madar-stamp/std",
+    "madar-names/std",
     "madar-protocol/std",
     "madar-identity/std",
     "madar-transactions/std",

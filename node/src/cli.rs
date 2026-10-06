@@ -49,6 +49,10 @@ pub enum Subcommand {
     #[command(subcommand)]
     Stamp(crate::stamp::StampCmd),
 
+    /// Madar Names for the server service: register and renew a name with the registrar account, and read a name's record (`madar-node names --help`).
+    #[command(subcommand)]
+    Names(crate::names::NamesCmd),
+
     /// Read-only check of a running node: sync, finality, peers, role, disk, keys, membership, clock (`madar-node doctor --help`).
     Doctor(crate::doctor::DoctorCmd),
 
