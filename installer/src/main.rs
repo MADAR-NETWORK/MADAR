@@ -869,9 +869,12 @@ mod lnk_tests {
             "MADAR Network node",
         )
         .unwrap();
+        // the same file, not the same text: Windows may give the temp folder in its short 8.3 form (RUNNER~1 on the CI)
+        let got = shell_link_target(&at).expect("the shortcut has a target");
         assert_eq!(
-            shell_link_target(&at).as_deref(),
-            Some(exe.display().to_string().as_str())
+            fs::canonicalize(&got).ok(),
+            fs::canonicalize(&exe).ok(),
+            "target {got}"
         );
         assert!(desktop_dir().is_some_and(|d| d.is_dir()));
         let _ = fs::remove_dir_all(&dir);
