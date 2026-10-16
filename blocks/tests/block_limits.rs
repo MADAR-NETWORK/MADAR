@@ -64,3 +64,23 @@ fn extrinsic_heavier_than_the_normal_class_weight_share_is_rejected() {
         );
     });
 }
+
+/// spec 9 (F10): the builder form gives exactly the value of the deprecated `max_with_normal_ratio` it replaced (no
+/// constant changed: same per-class limits, same header size; Normal = 75 %).
+#[test]
+#[allow(deprecated)]
+fn the_builder_block_length_equals_the_old_normal_ratio_form() {
+    let old = frame_system::limits::BlockLength::max_with_normal_ratio(
+        madar_blocks::MAX_BLOCK_SIZE_BYTES,
+        frame_support::sp_runtime::Perbill::from_percent(75),
+    );
+    let new = madar_blocks::MadarBlockLength::get();
+    for class in [
+        DispatchClass::Normal,
+        DispatchClass::Operational,
+        DispatchClass::Mandatory,
+    ] {
+        assert_eq!(new.max.get(class), old.max.get(class), "{class:?}");
+    }
+    assert_eq!(new.max_header_size(), old.max_header_size());
+}

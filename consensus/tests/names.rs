@@ -9,7 +9,7 @@ use madar_consensus::{
     AccountId, Address, Executive, OnboardingPolicy, Runtime, RuntimeCall, SignedExtra,
     UncheckedExtrinsic,
 };
-use madar_names::{register_message, NameOf, Names, Reserved, Wallet, WalletProof};
+use madar_names::{register_message, NameOf, Names, Wallet, WalletProof};
 use parity_scale_codec::Encode;
 use sp_core::Pair;
 use sp_runtime::{
@@ -49,6 +49,17 @@ fn start_block() {
     frame_system::Pallet::<Runtime>::set_block_number(13);
     frame_system::BlockHash::<Runtime>::insert(12u32, sp_core::H256::repeat_byte(1));
     pallet_timestamp::Now::<Runtime>::put(1_790_000_000_000u64);
+    run_spec9_upgrade();
+}
+
+/// The spec 9 upgrade as it runs on the live chain (Names storage 0 -> 1, Stamp 1 -> 2): v1 messages are accepted until
+/// the upgrade time + 72 h (independent review #2). A chain started from genesis with spec 9 code refuses v1 at once.
+fn run_spec9_upgrade() {
+    use frame_support::traits::{OnRuntimeUpgrade, StorageVersion};
+    StorageVersion::new(0).put::<madar_names::Pallet<Runtime>>();
+    StorageVersion::new(1).put::<madar_stamp::Pallet<Runtime>>();
+    <madar_names::Pallet<Runtime> as OnRuntimeUpgrade>::on_runtime_upgrade();
+    <madar_stamp::Pallet<Runtime> as OnRuntimeUpgrade>::on_runtime_upgrade();
 }
 
 fn nm(s: &str) -> NameOf {
@@ -81,43 +92,6 @@ fn register_call(name: &str, proof: WalletProof) -> RuntimeCall {
         proof,
         expires: 1_790_000_000_000 + 365 * 86_400_000,
     })
-}
-
-#[test]
-fn spec7_migration_seeds_the_first_registrar_and_reserved_names_once() {
-    use frame_support::traits::OnRuntimeUpgrade;
-    new_test_ext(&[]).execute_with(|| {
-        let first = AccountId::from(madar_consensus::FIRST_STAMPER);
-        assert!(!madar_names::Pallet::<Runtime>::is_registrar(&first));
-        madar_consensus::SeedNames::on_runtime_upgrade();
-        assert_eq!(
-            madar_names::Registrars::<Runtime>::get().into_inner(),
-            vec![first.clone()]
-        );
-        for n in madar_consensus::NAMES_RESERVED_AT_LAUNCH {
-            assert!(
-                Reserved::<Runtime>::contains_key(nm(n)),
-                "{n} must be reserved"
-            );
-            assert!(
-                madar_names::valid_name(n.as_bytes()),
-                "{n} must be a valid name"
-            );
-        }
-        // the committee changes its mind later: running the migration again changes nothing
-        frame_support::assert_ok!(madar_names::Pallet::<Runtime>::remove_registrar(
-            Committee::Members(2, 3).into(),
-            first
-        ));
-        frame_support::assert_ok!(madar_names::Pallet::<Runtime>::set_reserved(
-            Committee::Members(2, 3).into(),
-            nm("support"),
-            false
-        ));
-        madar_consensus::SeedNames::on_runtime_upgrade();
-        assert!(madar_names::Registrars::<Runtime>::get().is_empty());
-        assert!(!Reserved::<Runtime>::contains_key(nm("support")));
-    });
 }
 
 #[test]
@@ -279,5 +253,381 @@ fn v2_safe_sale_records_the_payment_proof_through_the_real_pipeline() {
                 .any(|e| e.event == want),
             "SaleCompletedV2 with the payment proof"
         );
+    });
+}
+
+// ---------------------------------------------------------------- spec 9: v2 messages, transfer, reassign, legacy switch
+
+const NOW: u64 = 1_790_000_000_000;
+const DAY: u64 = 86_400_000;
+
+/// The chain id the runtime puts in v2 messages: the stored block-0 hash (what `CheckGenesis` uses too).
+fn genesis() -> Vec<u8> {
+    frame_system::BlockHash::<Runtime>::get(0u32)
+        .as_ref()
+        .to_vec()
+}
+
+fn sol_proof(seed: u8, msg: &[u8]) -> (WalletProof, Wallet) {
+    let pair = sp_core::ed25519::Pair::from_seed(&[seed; 32]);
+    let public = pair.public().0;
+    (
+        WalletProof::Solana {
+            public,
+            signature: pair.sign(msg).0,
+        },
+        Wallet::Solana(public),
+    )
+}
+
+fn module_error(r: sp_runtime::ApplyExtrinsicResult) -> Option<&'static str> {
+    match r.expect("valid transaction") {
+        Err(sp_runtime::DispatchError::Module(m)) => m.message,
+        _ => None,
+    }
+}
+
+/// New calls keep their fixed indices (11..16 in Names, 3..4 in Stamp): clients and the committee tools encode them.
+#[test]
+fn spec9_call_indices_are_fixed() {
+    let p = || WalletProof::Solana {
+        public: [0; 32],
+        signature: [0; 64],
+    };
+    let reason = sp_runtime::BoundedVec::try_from(b"r".to_vec()).unwrap();
+    let pay_to = sp_runtime::BoundedVec::try_from(b"x".to_vec()).unwrap();
+    let calls: Vec<(madar_names::Call<Runtime>, u8)> = vec![
+        (
+            madar_names::Call::register_v2 {
+                name: nm("abc"),
+                proof: p(),
+                expires: 1,
+                valid_until: 1,
+            },
+            11,
+        ),
+        (
+            madar_names::Call::lock_sale_v3 {
+                name: nm("abc"),
+                seller_proof: p(),
+                price_cents: 1,
+                pay_to,
+                offer_until: 1,
+                buyer_proof: p(),
+                accept_until: 1,
+                lock_until: 1,
+                pay_amount: 1,
+                rail: 0,
+            },
+            12,
+        ),
+        (
+            madar_names::Call::cancel_offer_v2 {
+                name: nm("abc"),
+                owner_proof: p(),
+                valid_until: 1,
+            },
+            13,
+        ),
+        (
+            madar_names::Call::transfer {
+                name: nm("abc"),
+                owner_proof: p(),
+                new_owner_proof: p(),
+                valid_until: 1,
+            },
+            14,
+        ),
+        (
+            madar_names::Call::reassign {
+                name: nm("abc"),
+                new_owner: Wallet::Evm([0; 20]),
+                reason,
+            },
+            15,
+        ),
+        (
+            madar_names::Call::set_legacy_accepted_until { until: 0 },
+            16,
+        ),
+    ];
+    for (c, idx) in calls {
+        assert_eq!(RuntimeCall::Names(c).encode()[1], idx);
+    }
+    let entries = sp_runtime::BoundedVec::try_from(vec![]).unwrap();
+    assert_eq!(
+        RuntimeCall::Stamp(madar_stamp::Call::stamp_v2 { entries }).encode()[1],
+        3
+    );
+    assert_eq!(
+        RuntimeCall::Stamp(madar_stamp::Call::set_legacy_accepted_until { until: 0 }).encode()[1],
+        4
+    );
+}
+
+#[test]
+fn register_v2_through_the_real_pipeline_is_bound_to_this_genesis() {
+    new_test_ext(&[]).execute_with(|| {
+        start_block();
+        let until = NOW + DAY;
+        let call = |proof| {
+            RuntimeCall::Names(madar_names::Call::register_v2 {
+                name: nm("ahmad"),
+                proof,
+                expires: NOW + 365 * DAY,
+                valid_until: until,
+            })
+        };
+        let (proof, wallet) = evm_proof(
+            5,
+            &madar_names::register_message_v2(b"ahmad", &genesis(), until),
+        );
+        // only an approved registrar is onboarded for the new call too
+        let (spair, stranger) = signer(96);
+        let r = Executive::apply_extrinsic(signed(&spair, &stranger, call(proof.clone()), 0));
+        assert_eq!(
+            r.err(),
+            Some(TransactionValidityError::Invalid(
+                InvalidTransaction::Payment
+            ))
+        );
+        let (pair, reg) = signer(97);
+        frame_support::assert_ok!(madar_names::Pallet::<Runtime>::add_registrar(
+            Committee::Members(2, 3).into(),
+            reg.clone()
+        ));
+        // a proof for another chain (another genesis) is refused
+        let (other, _) = evm_proof(
+            5,
+            &madar_names::register_message_v2(b"ahmad", &[0x42; 32], until),
+        );
+        assert_eq!(
+            module_error(Executive::apply_extrinsic(signed(
+                &pair,
+                &reg,
+                call(other),
+                0
+            ))),
+            Some("InvalidProof")
+        );
+        // a refused first call does not create the account, so its nonce is still 0
+        assert!(
+            Executive::apply_extrinsic(signed(&pair, &reg, call(proof), 0))
+                .unwrap()
+                .is_ok()
+        );
+        assert_eq!(Names::<Runtime>::get(nm("ahmad")).unwrap().owner, wallet);
+    });
+}
+
+#[test]
+fn transfer_through_the_real_pipeline_and_committee_reassign() {
+    new_test_ext(&[]).execute_with(|| {
+        start_block();
+        let (pair, reg) = signer(98);
+        frame_support::assert_ok!(madar_names::Pallet::<Runtime>::add_registrar(
+            Committee::Members(2, 3).into(),
+            reg.clone()
+        ));
+        let (p, owner) = evm_proof(5, &register_message(b"ahmad"));
+        assert!(
+            Executive::apply_extrinsic(signed(&pair, &reg, register_call("ahmad", p), 0))
+                .unwrap()
+                .is_ok()
+        );
+        let n = madar_names::SaleNonce::<Runtime>::get(nm("ahmad"));
+        let until = NOW + 3_600_000;
+        let (ap, to) = sol_proof(
+            7,
+            &madar_names::accept_message(b"ahmad", n, &genesis(), until),
+        );
+        let (op, _) = evm_proof(
+            5,
+            &madar_names::transfer_message(b"ahmad", n, &to, &genesis(), until),
+        );
+        let call = RuntimeCall::Names(madar_names::Call::transfer {
+            name: nm("ahmad"),
+            owner_proof: op,
+            new_owner_proof: ap,
+            valid_until: until,
+        });
+        let (spair, stranger) = signer(99);
+        let r = Executive::apply_extrinsic(signed(&spair, &stranger, call.clone(), 0));
+        assert_eq!(
+            r.err(),
+            Some(TransactionValidityError::Invalid(
+                InvalidTransaction::Payment
+            ))
+        );
+        assert!(
+            Executive::apply_extrinsic(signed(&pair, &reg, call.clone(), 1))
+                .unwrap()
+                .is_ok()
+        );
+        let rec = Names::<Runtime>::get(nm("ahmad")).unwrap();
+        assert_eq!(
+            (rec.owner.clone(), rec.expires),
+            (to.clone(), NOW + 365 * DAY)
+        );
+        let want = madar_consensus::RuntimeEvent::Names(madar_names::Event::Transferred {
+            name: nm("ahmad"),
+            from: owner.clone(),
+            to: to.clone(),
+        });
+        assert!(frame_system::Pallet::<Runtime>::events()
+            .iter()
+            .any(|e| e.event == want));
+        // replay: refused (the name's number moved on)
+        assert_eq!(
+            module_error(Executive::apply_extrinsic(signed(&pair, &reg, call, 2))),
+            Some("InvalidProof")
+        );
+        // dispute: one member cannot, the 2-of-3 committee can, with a public reason; the term stays
+        let reason: sp_runtime::BoundedVec<u8, _> =
+            sp_runtime::BoundedVec::try_from(b"dispute #1".to_vec()).unwrap();
+        assert!(madar_names::Pallet::<Runtime>::reassign(
+            Committee::Member(reg.clone()).into(),
+            nm("ahmad"),
+            owner.clone(),
+            reason.clone()
+        )
+        .is_err());
+        assert!(madar_names::Pallet::<Runtime>::reassign(
+            Committee::Members(1, 3).into(),
+            nm("ahmad"),
+            owner.clone(),
+            reason.clone()
+        )
+        .is_err());
+        frame_support::assert_ok!(madar_names::Pallet::<Runtime>::reassign(
+            Committee::Members(2, 3).into(),
+            nm("ahmad"),
+            owner.clone(),
+            reason
+        ));
+        let rec = Names::<Runtime>::get(nm("ahmad")).unwrap();
+        assert_eq!((rec.owner, rec.expires), (owner, NOW + 365 * DAY));
+    });
+}
+
+#[test]
+fn v1_stops_72_hours_after_the_upgrade_and_only_the_committee_can_move_the_end_within_bounds() {
+    new_test_ext(&[]).execute_with(|| {
+        start_block();
+        let end = NOW + madar_stamp::LEGACY_SUNSET_MS;
+        assert_eq!(madar_names::LegacyAcceptedUntil::<Runtime>::get(), end);
+        assert_eq!(madar_stamp::LegacyAcceptedUntil::<Runtime>::get(), end);
+        let (pair, reg) = signer(100);
+        frame_support::assert_ok!(madar_names::Pallet::<Runtime>::add_registrar(
+            Committee::Members(2, 3).into(),
+            reg.clone()
+        ));
+        assert!(madar_names::Pallet::<Runtime>::set_legacy_accepted_until(
+            Committee::Member(reg.clone()).into(),
+            0
+        )
+        .is_err());
+        assert!(madar_stamp::Pallet::<Runtime>::set_legacy_accepted_until(
+            Committee::Members(1, 3).into(),
+            0
+        )
+        .is_err());
+        assert!(
+            madar_names::Pallet::<Runtime>::set_legacy_accepted_until(
+                Committee::Members(2, 3).into(),
+                u64::MAX
+            )
+            .is_err(),
+            "no open-ended window"
+        );
+        // no committee action at all: 72 h after the upgrade v1 is refused
+        pallet_timestamp::Now::<Runtime>::put(end);
+        let (p, _) = evm_proof(5, &register_message(b"ahmad"));
+        assert_eq!(
+            module_error(Executive::apply_extrinsic(signed(
+                &pair,
+                &reg,
+                register_call("ahmad", p.clone()),
+                0
+            ))),
+            Some("LegacyMessagesOff")
+        );
+        // the committee may extend (here by 7 days), and later shorten again
+        frame_support::assert_ok!(madar_names::Pallet::<Runtime>::set_legacy_accepted_until(
+            Committee::Members(2, 3).into(),
+            end + 7 * DAY
+        ));
+        // (the refused first call created no account: still nonce 0)
+        assert!(
+            Executive::apply_extrinsic(signed(&pair, &reg, register_call("ahmad", p), 0))
+                .unwrap()
+                .is_ok()
+        );
+        frame_support::assert_ok!(madar_names::Pallet::<Runtime>::set_legacy_accepted_until(
+            Committee::Members(2, 3).into(),
+            0
+        ));
+        frame_support::assert_ok!(madar_stamp::Pallet::<Runtime>::set_legacy_accepted_until(
+            Committee::Members(2, 3).into(),
+            0
+        ));
+        let (p, _) = evm_proof(6, &register_message(b"bader"));
+        assert_eq!(
+            module_error(Executive::apply_extrinsic(signed(
+                &pair,
+                &reg,
+                register_call("bader", p),
+                1
+            ))),
+            Some("LegacyMessagesOff")
+        );
+        pallet_timestamp::Now::<Runtime>::put(NOW);
+        let until = NOW + DAY;
+        let (p2, w) = evm_proof(
+            6,
+            &madar_names::register_message_v2(b"bader", &genesis(), until),
+        );
+        let call = RuntimeCall::Names(madar_names::Call::register_v2 {
+            name: nm("bader"),
+            proof: p2,
+            expires: NOW + 365 * DAY,
+            valid_until: until,
+        });
+        assert!(Executive::apply_extrinsic(signed(&pair, &reg, call, 2))
+            .unwrap()
+            .is_ok());
+        assert_eq!(Names::<Runtime>::get(nm("bader")).unwrap().owner, w);
+    });
+}
+
+/// Storage hygiene through the runtime: `on_idle` removes lapsed locks within its fixed budget, and that budget is a
+/// tiny part of a block.
+#[test]
+fn on_idle_cleanup_runs_in_the_runtime_within_a_small_fixed_budget() {
+    use frame_support::traits::Hooks;
+    new_test_ext(&[]).execute_with(|| {
+        start_block();
+        let lock = madar_names::SaleLock {
+            buyer: Wallet::Evm([1; 20]),
+            until: NOW - 1,
+            price_cents: 1,
+            pay_to: sp_runtime::BoundedVec::try_from(
+                b"0x00000000000000000000000000000000000000aa".to_vec(),
+            )
+            .unwrap(),
+        };
+        madar_names::Locks::<Runtime>::insert(nm("ahmad"), lock);
+        let w = <madar_names::Pallet<Runtime> as Hooks<u32>>::on_idle(
+            13,
+            frame_support::weights::Weight::MAX,
+        );
+        assert!(madar_names::Locks::<Runtime>::get(nm("ahmad")).is_none());
+        let max = <Runtime as frame_system::Config>::BlockWeights::get().max_block;
+        assert!(
+            w.ref_time() > 0 && w.ref_time() * 100 < max.ref_time(),
+            "cleanup reserves less than 1% of a block"
+        );
+        use frame_support::traits::GetStorageVersion;
+        assert_eq!(madar_names::Pallet::<Runtime>::in_code_storage_version(), 1);
     });
 }

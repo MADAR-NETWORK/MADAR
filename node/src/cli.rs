@@ -61,6 +61,10 @@ pub enum Subcommand {
     /// Read-only check of a running node: sync, finality, peers, role, disk, keys, membership, clock (`madar-node doctor --help`).
     Doctor(crate::doctor::DoctorCmd),
 
+    /// Seal the voting node's secret file with Windows protection (DPAPI) and safely delete the plain original, and check the sealed file (`madar-node secret --help`).
+    #[command(subcommand)]
+    Secret(crate::sealed::SecretCmd),
+
     /// Verify a signed update manifest locally (§14/D32: opt-in, no network, no
     /// automatic update). The operator fetches `--manifest-file`/`--signature-file`
     /// themselves from any source they trust (no network-fetch code is embedded here, by design).

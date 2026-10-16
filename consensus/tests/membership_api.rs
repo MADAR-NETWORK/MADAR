@@ -4,7 +4,7 @@
 mod common;
 
 use common::{dev_validator, new_test_ext};
-use frame_support::{traits::Get, BoundedVec};
+use frame_support::BoundedVec;
 use madar_consensus::{membership_api, AccountId, Runtime};
 use parity_scale_codec::Encode;
 use sp_consensus_babe::Slot;

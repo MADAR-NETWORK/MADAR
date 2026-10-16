@@ -32,6 +32,21 @@ fn current_round_seed() -> sp_core::H256 {
     TestRandomness::random(madar_protocol::ADMISSION_PUZZLE_DOMAIN).0
 }
 
+/// spec 9: was the last submission of `who` a counted rejection (`SolutionRejected`)? Returns `pool_full`.
+fn last_rejection(who: &AccountId32) -> Option<bool> {
+    frame_system::Pallet::<TestRuntime>::events()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.event {
+            RuntimeEvent::Admission(madar_admission::Event::SolutionRejected {
+                who: w,
+                pool_full,
+                ..
+            }) if w == who => Some(*pool_full),
+            _ => None,
+        })
+}
+
 /// **D47:** automatically vouches for `who` with a test operator with a generous cap before submitting
 /// the solution — the tests of this file check the lottery/validity/liveness engine
 /// itself, not the operator caps (they have their own tests in `operator_caps.rs`).
@@ -99,11 +114,15 @@ fn an_insufficient_solution_is_rejected() {
         let bad = (0u64..)
             .find(|n| !A::solution_meets_difficulty(&who, &seed, *n))
             .unwrap();
+        frame_system::Pallet::<TestRuntime>::set_block_number(1); // events are recorded from block 1
         let r = Admission::submit_admission_solution(RuntimeOrigin::signed(who.clone()), bad);
+        // spec 9: the wrong solution is counted (success + event), so the attempt cannot be replayed for free
         assert_eq!(
-            r.unwrap_err().error,
-            Error::<TestRuntime>::SolutionDoesNotMeetDifficulty.into()
+            r.unwrap().actual_weight,
+            None,
+            "full Argon2 weight, no refund"
         );
+        assert_eq!(last_rejection(&who), Some(false), "rejected for difficulty");
         assert!(A::candidates().is_empty());
     });
 }
@@ -113,6 +132,7 @@ fn an_insufficient_solution_is_rejected() {
 fn an_unvouched_account_cannot_become_a_candidate() {
     new_test_ext().execute_with(|| {
         let who = account(6);
+        give_account(&who); // an existing account gets the error (a key without one gets SolutionRefused, review #6)
         let nonce = find_valid_nonce(&who, &current_round_seed());
         let r = Admission::submit_admission_solution(RuntimeOrigin::signed(who.clone()), nonce);
         assert_eq!(
@@ -141,8 +161,17 @@ fn a_solution_cannot_be_transferred_to_a_different_identity() {
                     && !A::solution_meets_difficulty(&b, &seed, *n)
             })
             .unwrap();
-        assert!(Admission::submit_admission_solution(RuntimeOrigin::signed(b), nonce).is_err());
-        assert!(Admission::submit_admission_solution(RuntimeOrigin::signed(a), nonce).is_ok());
+        assert!(
+            Admission::submit_admission_solution(RuntimeOrigin::signed(b.clone()), nonce).is_ok()
+        );
+        assert!(
+            !A::candidates().contains(&b),
+            "another identity's solution is rejected (counted, not admitted)"
+        );
+        assert!(
+            Admission::submit_admission_solution(RuntimeOrigin::signed(a.clone()), nonce).is_ok()
+        );
+        assert!(A::candidates().contains(&a));
     });
 }
 
@@ -198,6 +227,7 @@ fn output_of(who: &AccountId32) -> [u8; 32] {
 #[test]
 fn the_candidate_pool_is_bounded_and_ranked_by_the_argon2_output() {
     new_test_ext().execute_with(|| {
+        frame_system::Pallet::<TestRuntime>::set_block_number(1); // events are recorded from block 1 (the seed is fixed from here)
         let mut pool: Vec<(AccountId32, [u8; 32])> = (20u8..30)
             .map(account)
             .map(|a| {
@@ -226,10 +256,15 @@ fn the_candidate_pool_is_bounded_and_ranked_by_the_argon2_output() {
         );
 
         // Its output is worse than everyone in the set now: rejected — but **after** Argon2 (full weight, not a free rejection).
-        let err = submit(&worst).unwrap_err();
-        assert_eq!(err.error, Error::<TestRuntime>::AdmissionCapReached.into());
+        let ok = submit(&worst).unwrap();
         assert_eq!(
-            err.post_info.actual_weight, None,
+            last_rejection(&worst),
+            Some(true),
+            "rejected: pool full and not better"
+        );
+        assert!(!A::candidates().contains(&worst));
+        assert_eq!(
+            ok.actual_weight, None,
             "a rank rejection already paid the full Argon2 weight"
         );
     });
@@ -241,6 +276,7 @@ fn the_candidate_pool_is_bounded_and_ranked_by_the_argon2_output() {
 #[test]
 fn grinding_identities_by_a_cheap_key_buys_no_pool_position() {
     new_test_ext().execute_with(|| {
+        frame_system::Pallet::<TestRuntime>::set_block_number(1); // events are recorded from block 1 (the seed is fixed from here)
         let seed = current_round_seed();
         let cheap = |who: &AccountId32| {
             let mut input = seed.as_ref().to_vec();
@@ -263,8 +299,8 @@ fn grinding_identities_by_a_cheap_key_buys_no_pool_position() {
         for (who, _) in by_output.iter().take(4) {
             submit(who).unwrap();
         }
-        let err = submit(&cheap_champion).unwrap_err();
-        assert_eq!(err.error, Error::<TestRuntime>::AdmissionCapReached.into());
+        submit(&cheap_champion).unwrap();
+        assert_eq!(last_rejection(&cheap_champion), Some(true));
         assert!(!A::candidates().contains(&cheap_champion));
         // And the same identity cannot improve its rank by resubmitting in the round: improving = a new identity + a new puzzle.
         let (in_pool, _) = by_output[0].clone();
@@ -357,8 +393,7 @@ fn winners_depend_on_entropy_written_only_after_the_close() {
 fn renewal_extends_the_term_and_is_accounted_separately_from_new_admissions() {
     new_test_ext().execute_with(|| {
         let member = account(40);
-        Admission::dev_only_force_set_validators(RuntimeOrigin::root(), vec![member.clone()])
-            .unwrap();
+        force_validators(vec![member.clone()]);
         rotate(1);
         assert_eq!(
             madar_admission::MembershipExpiry::<TestRuntime>::get(&member),
@@ -389,11 +424,7 @@ fn renewal_extends_the_term_and_is_accounted_separately_from_new_admissions() {
 fn a_membership_not_renewed_is_removed_after_term_plus_grace() {
     new_test_ext().execute_with(|| {
         let (stale, keeper) = (account(60), account(61));
-        Admission::dev_only_force_set_validators(
-            RuntimeOrigin::root(),
-            vec![stale.clone(), keeper.clone()],
-        )
-        .unwrap();
+        force_validators(vec![stale.clone(), keeper.clone()]);
         for i in 1..=4 {
             assert!(rotate(i).contains(&stale), "still a member at session {i}");
         }
@@ -413,8 +444,7 @@ fn a_membership_not_renewed_is_removed_after_term_plus_grace() {
 fn removals_never_empty_the_validator_set() {
     new_test_ext().execute_with(|| {
         let only = account(70);
-        Admission::dev_only_force_set_validators(RuntimeOrigin::root(), vec![only.clone()])
-            .unwrap();
+        force_validators(vec![only.clone()]);
         for i in 1..=8 {
             assert_eq!(
                 rotate(i),
@@ -435,13 +465,9 @@ fn removals_never_empty_the_validator_set() {
 fn a_permanently_banned_key_is_never_admitted_again_and_is_removed_everywhere() {
     new_test_ext().execute_with(|| {
         let (offender, other) = (account(7), account(8));
-        Admission::dev_only_force_set_validators(
-            RuntimeOrigin::root(),
-            vec![offender.clone(), other],
-        )
-        .unwrap();
+        force_validators(vec![offender.clone(), other]);
         Admission::voluntary_exit(RuntimeOrigin::signed(offender.clone())).unwrap();
-        Admission::ban_key(RuntimeOrigin::root(), offender.clone()).expect("root can ban");
+        A::ban(&offender);
         assert!(
             !A::validators().contains(&offender),
             "ban removes immediately"
@@ -464,7 +490,7 @@ fn the_last_voter_banned_for_equivocation_is_kept_until_a_replacement_is_admitte
     new_test_ext().execute_with(|| {
         frame_system::Pallet::<TestRuntime>::set_block_number(1);
         let only = account(71);
-        Admission::dev_only_force_set_validators(RuntimeOrigin::root(), vec![only.clone()]).unwrap();
+        force_validators(vec![only.clone()]);
 
         A::ban(&only);
         assert_eq!(A::validators(), vec![only.clone()], "banning the last live voter must not empty the set");
@@ -494,23 +520,26 @@ fn the_last_voter_banned_for_equivocation_is_kept_until_a_replacement_is_admitte
 fn a_banned_voter_that_is_not_the_last_is_still_removed_immediately() {
     new_test_ext().execute_with(|| {
         let (offender, honest) = (account(73), account(74));
-        Admission::dev_only_force_set_validators(
-            RuntimeOrigin::root(),
-            vec![offender.clone(), honest.clone()],
-        )
-        .unwrap();
+        force_validators(vec![offender.clone(), honest.clone()]);
         A::ban(&offender);
         assert_eq!(A::validators(), vec![honest.clone()]);
         assert_eq!(rotate(1), vec![honest]);
     });
 }
 
+/// spec 9: the two closed admin calls are gone; their indices (2, 3) decode to nothing (never reused).
 #[test]
-fn ban_key_requires_root_origin() {
-    new_test_ext().execute_with(|| {
-        let r = Admission::ban_key(RuntimeOrigin::signed(account(1)), account(2));
-        assert_eq!(r, Err(DispatchError::BadOrigin));
-    });
+fn the_removed_admin_call_indices_do_not_decode() {
+    use parity_scale_codec::Decode;
+    for index in [2u8, 3u8] {
+        let mut bytes = vec![index];
+        bytes.extend_from_slice(&[0u8; 33]);
+        assert!(
+            madar_admission::Call::<TestRuntime>::decode(&mut &bytes[..]).is_err(),
+            "call index {index} must stay unused"
+        );
+    }
+    let _ = DispatchError::BadOrigin; // the import stays used by the setter tests below
 }
 
 #[test]
@@ -530,11 +559,7 @@ fn only_current_validators_can_register_a_voluntary_exit() {
 fn voluntary_exit_is_enacted_only_at_the_next_session_rotation() {
     new_test_ext().execute_with(|| {
         let (leaving, staying) = (account(90), account(91));
-        Admission::dev_only_force_set_validators(
-            RuntimeOrigin::root(),
-            vec![leaving.clone(), staying.clone()],
-        )
-        .unwrap();
+        force_validators(vec![leaving.clone(), staying.clone()]);
         Admission::voluntary_exit(RuntimeOrigin::signed(leaving.clone())).unwrap();
         assert!(
             A::validators().contains(&leaving),
@@ -609,46 +634,25 @@ fn entropy_starvation_never_drops_accepted_candidates_and_recovers() {
         // The fifth round: accepted into `Round` but there is no room in the queue to close it — it stays open (no deletion).
         submit(&account(64)).unwrap();
         rotate_raw(5);
-        assert_eq!(
-            madar_admission::Pending::<TestRuntime>::get().len(),
-            4,
-            "queue stays bounded"
-        );
-        assert_eq!(
-            A::candidates(),
-            vec![account(64)],
-            "the open round is kept, not dropped"
-        );
+        assert_eq!(madar_admission::Pending::<TestRuntime>::get().len(), 4, "queue stays bounded");
+        assert_eq!(A::candidates(), vec![account(64)], "the open round is kept, not dropped");
 
         // The sixth: new candidacy is restricted instead of deleting the accepted one.
         frame_system::Pallet::<TestRuntime>::set_block_number(2); // a new seed (a new epoch)
-        assert_eq!(
-            submit(&account(65)),
-            Err(early_reject(Error::<TestRuntime>::CandidacyBacklogFull))
-        );
+        assert_eq!(submit(&account(65)), Err(early_reject(Error::<TestRuntime>::CandidacyBacklogFull)));
         rotate_raw(6);
         assert_eq!(madar_admission::Pending::<TestRuntime>::get().len(), 4);
         assert_eq!(A::candidates(), vec![account(64)]);
-        assert!(
-            A::validators().is_empty(),
-            "nothing drawn without fresh entropy"
-        );
+        assert!(A::validators().is_empty(), "nothing drawn without fresh entropy");
 
-        // Recovery: fresh entropy => the four rounds are drawn (all older than the delay), and the open round closes in the freed slot.
+        // Recovery: fresh entropy => the four rounds (all older than the delay) are drawn **in one draw** and the open round
+        // is closed in the freed slot. spec 9 (D54): the cap is for the whole rotation, so 2 of the four win the draw — not 4.
         mine(3);
         rotate_raw(7);
         let admitted = A::validators();
-        for e in 0..4u8 {
-            assert!(
-                admitted.contains(&account(60 + e)),
-                "accepted candidate {e} must not be lost"
-            );
-        }
-        assert_eq!(
-            A::candidates(),
-            Vec::<AccountId32>::new(),
-            "the held round was closed into the freed slot"
-        );
+        let winners = (0..4u8).filter(|e| admitted.contains(&account(60 + e))).count();
+        assert_eq!(winners, 2, "all four pools take part in ONE draw capped at AdmissionCapPerRound (2), not 2 per pool");
+        assert_eq!(A::candidates(), Vec::<AccountId32>::new(), "the held round was closed into the freed slot");
         assert_eq!(madar_admission::Pending::<TestRuntime>::get().len(), 1);
 
         // Candidacy opens again (no stall), and the held round's candidacy is drawn later.
@@ -657,10 +661,7 @@ fn entropy_starvation_never_drops_accepted_candidates_and_recovers() {
         rotate_raw(8);
         mine(3);
         rotate_raw(9);
-        assert!(
-            A::validators().contains(&account(64)),
-            "the held candidate is eventually admitted"
-        );
+        assert!(A::validators().contains(&account(64)), "the held candidate is eventually admitted");
     });
 }
 
@@ -669,7 +670,7 @@ fn entropy_starvation_never_drops_accepted_candidates_and_recovers() {
 fn a_winner_is_never_silently_dropped_when_the_validator_set_is_full() {
     new_test_ext().execute_with(|| {
         let full: Vec<AccountId32> = (0u8..100).map(|i| account(i.wrapping_add(120))).collect();
-        Admission::dev_only_force_set_validators(RuntimeOrigin::root(), full.clone()).unwrap();
+        force_validators(full.clone());
         let who = account(250);
         submit(&who).unwrap();
         rotate(1);
@@ -691,7 +692,7 @@ fn a_winner_is_never_silently_dropped_when_the_validator_set_is_full() {
 fn per_account_state_never_outlives_membership_across_many_rounds() {
     use madar_admission::{BannedKeys, MembershipExpiry, PendingVoluntaryExit};
     new_test_ext().execute_with(|| {
-        Admission::dev_only_force_set_validators(RuntimeOrigin::root(), (1..=6).map(account).collect()).unwrap();
+        force_validators((1..=6).map(account).collect());
         let mut bans = 0usize;
         let mut ever: std::collections::BTreeSet<AccountId32> = A::validators().into_iter().collect();
         for round in 0..30u32 {
@@ -709,7 +710,7 @@ fn per_account_state_never_outlives_membership_across_many_rounds() {
             if round % 7 == 3 && members.len() > 2 {
                 let victim = members.last().unwrap().clone();
                 if !BannedKeys::<TestRuntime>::contains_key(&victim) {
-                    Admission::ban_key(RuntimeOrigin::root(), victim).unwrap();
+                    A::ban(&victim);
                     bans += 1;
                 }
             }

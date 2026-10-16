@@ -24,5 +24,7 @@ fn the_default_build_carries_only_production_constants() {
         VERSION.spec_version, 9,
         "upgrade-fixture leaked into the default build"
     );
-    assert_eq!(<<madar_consensus::Runtime as madar_admission::Config>::AdmissionCapPerRound as Get<u32>>::get(), 2, "D54: testnet admission cap");
+    assert_eq!(<<madar_consensus::Runtime as madar_admission::Config>::DefaultAdmissionCapPerRound as Get<u32>>::get(), 2, "D54: testnet admission cap");
+    assert_eq!(<<madar_consensus::Runtime as madar_admission::Config>::DefaultMaxVotesPerOperator as Get<u32>>::get(), 1, "D52: one vote per operator");
+    assert_eq!(VERSION.transaction_version, 2, "spec 9: calls removed");
 }

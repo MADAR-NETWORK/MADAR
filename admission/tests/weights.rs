@@ -35,7 +35,8 @@ fn cheap_rejections_are_refunded_but_a_failed_puzzle_pays_the_full_argon2_weight
     new_test_ext().execute_with(|| {
         // 1) Banned: early rejection with a low actual weight.
         let banned = account(60);
-        Admission::ban_key(RuntimeOrigin::root(), banned.clone()).unwrap();
+        give_account(&banned); // an existing account gets the error (spec 9 review #6)
+        madar_admission::Pallet::<TestRuntime>::ban(&banned);
         let err =
             Admission::submit_admission_solution(RuntimeOrigin::signed(banned), 0).unwrap_err();
         assert_eq!(
@@ -55,10 +56,12 @@ fn cheap_rejections_are_refunded_but_a_failed_puzzle_pays_the_full_argon2_weight
         let bad_nonce = (0u64..)
             .find(|n| !Admission::solution_meets_difficulty(&who, &seed, *n))
             .unwrap();
-        let err = Admission::submit_admission_solution(RuntimeOrigin::signed(who), bad_nonce)
-            .unwrap_err();
+        // spec 9: a wrong solution is a *successful* call with a `SolutionRejected` event (an error would roll the
+        // attempt counter back); still no refund — the Argon2 work was spent.
+        let ok =
+            Admission::submit_admission_solution(RuntimeOrigin::signed(who), bad_nonce).unwrap();
         assert_eq!(
-            err.post_info.actual_weight, None,
+            ok.actual_weight, None,
             "a failed puzzle already spent the Argon2 work: no refund"
         );
     });

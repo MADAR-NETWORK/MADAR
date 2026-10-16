@@ -132,7 +132,7 @@ fn genesis_committee_members_run_propose_and_vote_with_signed_transactions() {
         assert_eq!(providers(&member_b), 0);
 
         // A real Root proposal that leaves an inspectable trace: writing a raw storage key
-        // (`set_storage` is Root-only; `dev_only_force_set_validators` is closed in the Runtime — N1).
+        // (`set_storage` is Root-only; `dev_only_force_set_validators` was removed in spec 9).
         const PROBE: &[u8] = b":madar:test:committee-probe";
         let inner =
             RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root {
@@ -279,10 +279,11 @@ fn a_successful_admission_creates_the_account_and_enters_the_lottery() {
     });
 }
 
-/// Failed onboarding: the transaction is included (and charged for its weight) but there is no account, no Nonce and no
-/// Admission state — no persistent trace at all.
+/// spec 9: a wrong solution from a **vouched** node is counted (transaction success with `SolutionRejected`): its account is created and the Nonce advances, so
+/// the same transaction cannot be replayed for free (before, it failed with no account and no Nonce, so anyone could resend it until it expired, each time
+/// a full Argon2 in the block), and the count is recorded on its operator. No membership and no candidacy.
 #[test]
-fn a_failed_admission_leaves_no_account_nonce_or_admission_state() {
+fn a_failed_admission_of_a_vouched_node_is_counted_and_cannot_be_replayed() {
     new_test_ext(&[]).execute_with(|| {
         start_block();
         let (pair, who) = signer(80);
@@ -293,19 +294,48 @@ fn a_failed_admission_leaves_no_account_nonce_or_admission_state() {
 
         let call =
             RuntimeCall::Admission(madar_admission::Call::submit_admission_solution { nonce: bad });
-        let outcome = Executive::apply_extrinsic(signed(&pair, &who, call, 0)).expect("includable");
+        let xt = signed(&pair, &who, call, 0);
+        let outcome = Executive::apply_extrinsic(xt.clone()).expect("includable");
         assert!(
-            outcome.is_err(),
-            "a wrong solution must fail at dispatch: {outcome:?}"
+            outcome.is_ok(),
+            "a wrong solution is counted (no rollback of the counter): {outcome:?}"
         );
+        assert!(frame_system::Pallet::<Runtime>::events()
+            .iter()
+            .any(|e| matches!(
+                e.event,
+                madar_consensus::RuntimeEvent::Admission(
+                    madar_admission::Event::SolutionRejected {
+                        pool_full: false,
+                        ..
+                    }
+                )
+            )));
 
-        assert!(
-            !frame_system::Account::<Runtime>::contains_key(&who),
-            "no Account entry may be created"
+        assert_eq!(
+            account_count(),
+            before + 1,
+            "the vouched node's account exists now"
         );
-        assert_eq!(account_count(), before);
-        assert_eq!(frame_system::Pallet::<Runtime>::account_nonce(&who), 0);
-        assert!(admission_state_is_empty());
+        assert_eq!(
+            frame_system::Pallet::<Runtime>::account_nonce(&who),
+            1,
+            "the nonce moved: no free replay"
+        );
+        assert_eq!(
+            Executive::apply_extrinsic(xt).err(),
+            Some(TransactionValidityError::Invalid(InvalidTransaction::Stale)),
+            "the same signed transaction cannot be included again"
+        );
+        assert!(
+            admission_state_is_empty(),
+            "no membership, no candidacy, no ban"
+        );
+        assert_eq!(
+            madar_admission::SolutionAttempts::<Runtime>::get(AccountId::from([200u8; 32])),
+            Some((0, 1)),
+            "counted on its operator"
+        );
     });
 }
 
@@ -360,8 +390,8 @@ fn an_unapproved_account_cannot_create_an_account_by_vouching() {
     });
 }
 
-/// A large number of failed attempts (across several "blocks") from different new keys: the number
-/// of accounts and the Admission state remain exactly as in Genesis — no accumulation.
+/// A large number of attempts (over several "blocks") from new **unvouched** keys: spec 9 — refused before inclusion (`Payment`)
+/// so they take no block space and leave no trace; the number of accounts and the Admission state stay exactly as in Genesis.
 #[test]
 fn many_failed_admissions_never_accumulate_permanent_state() {
     new_test_ext(&[]).execute_with(|| {
@@ -380,9 +410,14 @@ fn many_failed_admissions_never_accumulate_permanent_state() {
                     RuntimeCall::Admission(madar_admission::Call::submit_admission_solution {
                         nonce: bad,
                     });
-                let outcome =
-                    Executive::apply_extrinsic(signed(&pair, &who, call, 0)).expect("includable");
-                assert!(outcome.is_err());
+                let outcome = Executive::apply_extrinsic(signed(&pair, &who, call, 0));
+                assert_eq!(
+                    outcome.err(),
+                    Some(TransactionValidityError::Invalid(
+                        InvalidTransaction::Payment
+                    )),
+                    "refused before inclusion"
+                );
                 attempts += 1;
             }
             assert_eq!(
@@ -433,5 +468,80 @@ fn a_committee_members_failed_first_call_leaves_no_account_and_a_valid_one_still
         assert!(outcome.is_ok(), "{outcome:?}");
         assert_eq!(providers(&member_a), 1);
         assert_eq!(frame_system::Pallet::<Runtime>::account_nonce(&member_a), 1);
+    });
+}
+
+/// spec 9 (independent review #6, attack): a vouched node whose FIRST submission is refused by an early check (here its
+/// operator's attempt budget for the round is used up) used to fail with an error: no account, no nonce, so the same
+/// signed bytes could be included again and again until their era ended. Now the refusal is a success with
+/// `SolutionRefused`: the account is created, the nonce moves, and the replay is `Stale`.
+#[test]
+fn a_vouched_nodes_first_submission_refused_early_cannot_be_replayed() {
+    new_test_ext(&[]).execute_with(|| {
+        start_block();
+        let (pair, who) = signer(81);
+        let op = AccountId::from([201u8; 32]);
+        madar_admission::NodeOperator::<Runtime>::insert(&who, op.clone());
+        let session = madar_admission::CurrentSession::<Runtime>::get();
+        let limit = madar_admission::MAX_SOLUTION_ATTEMPTS_PER_ROUND
+            * madar_admission::MaxVotesPerOperator::<Runtime>::get();
+        madar_admission::SolutionAttempts::<Runtime>::insert(&op, (session, limit));
+
+        let call = RuntimeCall::Admission(madar_admission::Call::submit_admission_solution {
+            nonce: VALID_NONCE_FOR_SEED_77,
+        });
+        let xt = signed(&pair, &who, call, 0);
+        let outcome = Executive::apply_extrinsic(xt.clone()).expect("includable");
+        assert!(
+            outcome.is_ok(),
+            "refused early, but counted as a transaction: {outcome:?}"
+        );
+        assert!(frame_system::Pallet::<Runtime>::events()
+            .iter()
+            .any(|e| matches!(
+                e.event,
+                madar_consensus::RuntimeEvent::Admission(madar_admission::Event::SolutionRefused {
+                    reason: madar_admission::RefusalReason::TooManySolutionAttempts,
+                    ..
+                })
+            )));
+        assert_eq!(providers(&who), 1);
+        assert_eq!(frame_system::Pallet::<Runtime>::account_nonce(&who), 1);
+        assert_eq!(
+            Executive::apply_extrinsic(xt).err(),
+            Some(TransactionValidityError::Invalid(InvalidTransaction::Stale)),
+            "the same bytes cannot be included again"
+        );
+        assert!(admission_state_is_empty(), "no candidacy");
+    });
+}
+
+/// spec 9 (independent review #5): the onboarding policy for a fresh key uses O(1) reads (`NodeOperator`,
+/// `MembershipExpiry`), never the whole member list — a member without an account (a founding seat) is still allowed,
+/// an unvouched non-member is refused before the pool.
+#[test]
+fn the_onboarding_policy_admits_vouched_nodes_and_members_only() {
+    use madar_transactions::AccountCreationPolicy;
+    new_test_ext(&[]).execute_with(|| {
+        let call =
+            RuntimeCall::Admission(madar_admission::Call::submit_admission_solution { nonce: 1 });
+        let (_, stranger) = signer(82);
+        assert!(!OnboardingPolicy::may_create_account(&stranger, &call));
+        let (_, member) = signer(83);
+        madar_admission::MembershipExpiry::<Runtime>::insert(&member, 84);
+        assert!(
+            OnboardingPolicy::may_create_account(&member, &call),
+            "a member (MembershipExpiry) may renew"
+        );
+        let (_, node) = signer(84);
+        madar_admission::NodeOperator::<Runtime>::insert(&node, AccountId::from([202u8; 32]));
+        assert!(OnboardingPolicy::may_create_account(&node, &call));
+        // no decode of the member list: the policy keeps working with a Validators value that does not even decode
+        frame_support::storage::unhashed::put_raw(
+            &frame_support::storage::storage_prefix(b"Admission", b"Validators"),
+            &[0xff, 0xff, 0xff],
+        );
+        assert!(OnboardingPolicy::may_create_account(&member, &call));
+        assert!(!OnboardingPolicy::may_create_account(&stranger, &call));
     });
 }

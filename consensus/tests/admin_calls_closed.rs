@@ -1,113 +1,53 @@
-//! N1 ((internal design document)) — on the actual Runtime: `dev_only_force_set_validators`
-//! and `ban_key` are reachable by no origin, not even the Root produced by the upgrade committee via `dispatch_as_root`
-//! (with 2-of-3 or 3-of-3 approval). The inner call is rejected with `BadOrigin` and leaves no trace.
+//! N1 then spec 9 — the Admission admin calls `ban_key` (2) and `dev_only_force_set_validators` (3) were closed
+//! (`EnsureNever`) since N1, and were removed from the Pallet in spec 9. Their indices are never reused: any transaction or committee proposal
+//! carrying their bytes does not decode at all (it reaches no logic), and banning stays through Equivocation only (`BanOnOffence`).
 
 mod common;
 
-use frame_support::assert_ok;
-use madar_consensus::{
-    Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, UpgradeCommitteeInstance,
-};
-use pallet_collective::RawOrigin as CollectiveRawOrigin;
-use sp_runtime::DispatchError;
+use madar_consensus::RuntimeCall;
+use parity_scale_codec::{Decode, Encode};
 
-fn members_origin(yes: u32, total: u32) -> RuntimeOrigin {
-    CollectiveRawOrigin::<sp_runtime::AccountId32, UpgradeCommitteeInstance>::Members(yes, total)
-        .into()
-}
+/// The Admission index in `construct_runtime!` (System 0 … Historical 7, Admission 8).
+const ADMISSION_INDEX: u8 = 8;
 
-fn force_set(target: sp_runtime::AccountId32) -> Box<RuntimeCall> {
-    Box::new(RuntimeCall::Admission(
-        madar_admission::Call::dev_only_force_set_validators {
-            validators: vec![target],
-        },
-    ))
-}
-
-fn ban(offender: sp_runtime::AccountId32) -> Box<RuntimeCall> {
-    Box::new(RuntimeCall::Admission(madar_admission::Call::ban_key {
-        offender,
-    }))
-}
-
-/// Result of the last inner call executed by the committee (the outer wrapper always returns Ok by design).
-fn last_committee_dispatch_result() -> sp_runtime::DispatchResult {
-    frame_system::Pallet::<Runtime>::events()
-        .into_iter()
-        .rev()
-        .find_map(|r| match r.event {
-            RuntimeEvent::UpgradeAuthority(
-                madar_upgrade_authority::Event::RootCallDispatched { result },
-            ) => Some(result),
-            _ => None,
-        })
-        .expect("the committee dispatch must emit RootCallDispatched")
+#[test]
+fn the_admission_pallet_index_is_the_one_used_below() {
+    let call = RuntimeCall::Admission(madar_admission::Call::voluntary_exit {});
+    assert_eq!(
+        call.encode(),
+        vec![ADMISSION_INDEX, 1],
+        "Admission = 8, voluntary_exit = 1"
+    );
 }
 
 #[test]
-fn the_committee_cannot_force_set_validators() {
-    common::new_test_ext(&[]).execute_with(|| {
-        frame_system::Pallet::<Runtime>::set_block_number(1);
-        let target = common::dev_validator(9).account;
-
-        for (yes, total) in [(2, 3), (3, 3)] {
-            assert_ok!(madar_consensus::UpgradeAuthority::dispatch_as_root(
-                members_origin(yes, total),
-                force_set(target.clone())
-            ));
-            assert_eq!(
-                last_committee_dispatch_result(),
-                Err(DispatchError::BadOrigin),
-                "{yes}-of-{total}"
-            );
-            assert!(
-                madar_admission::Pallet::<Runtime>::validators().is_empty(),
-                "no validator set change"
-            );
-        }
-    });
-}
-
-#[test]
-fn the_committee_cannot_ban_a_key() {
-    common::new_test_ext(&[]).execute_with(|| {
-        frame_system::Pallet::<Runtime>::set_block_number(1);
-        let offender = common::dev_validator(9).account;
-
-        for (yes, total) in [(2, 3), (3, 3)] {
-            assert_ok!(madar_consensus::UpgradeAuthority::dispatch_as_root(
-                members_origin(yes, total),
-                ban(offender.clone())
-            ));
-            assert_eq!(
-                last_committee_dispatch_result(),
-                Err(DispatchError::BadOrigin),
-                "{yes}-of-{total}"
-            );
-            assert!(
-                !madar_admission::BannedKeys::<Runtime>::contains_key(&offender),
-                "no ban recorded"
-            );
-        }
-    });
-}
-
-#[test]
-fn a_direct_root_origin_is_rejected_for_both_calls() {
-    common::new_test_ext(&[]).execute_with(|| {
-        let who = common::dev_validator(9).account;
-        assert_eq!(
-            madar_admission::Pallet::<Runtime>::dev_only_force_set_validators(
-                RuntimeOrigin::root(),
-                vec![who.clone()]
-            ),
-            Err(DispatchError::BadOrigin)
+fn the_removed_admin_calls_do_not_decode_as_any_runtime_call() {
+    let account = common::dev_validator(9).account;
+    // ban_key { offender }
+    let mut ban = vec![ADMISSION_INDEX, 2];
+    ban.extend(account.encode());
+    // dev_only_force_set_validators { validators: vec![account] }
+    let mut force = vec![ADMISSION_INDEX, 3];
+    force.extend(vec![account].encode());
+    for bytes in [ban, force] {
+        assert!(
+            RuntimeCall::decode(&mut &bytes[..]).is_err(),
+            "call index {} must stay unused",
+            bytes[1]
         );
-        assert_eq!(
-            madar_admission::Pallet::<Runtime>::ban_key(RuntimeOrigin::root(), who.clone()),
-            Err(DispatchError::BadOrigin)
-        );
-        assert!(madar_admission::Pallet::<Runtime>::validators().is_empty());
-        assert!(!madar_admission::BannedKeys::<Runtime>::contains_key(&who));
+    }
+}
+
+/// A committee proposal wrapping one of the two removed calls (`dispatch_as_root`) does not decode either: there is no way to pass it to any logic.
+#[test]
+fn a_committee_proposal_wrapping_a_removed_call_does_not_decode() {
+    let inner_ok = RuntimeCall::Admission(madar_admission::Call::voluntary_exit {});
+    let wrapper = RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root {
+        call: Box::new(inner_ok),
     });
+    let mut bytes = wrapper.encode();
+    // the last byte is the inner call index (voluntary_exit = 1): point it at the removed `ban_key` (2) + an account
+    *bytes.last_mut().unwrap() = 2;
+    bytes.extend(common::dev_validator(9).account.encode());
+    assert!(RuntimeCall::decode(&mut &bytes[..]).is_err());
 }

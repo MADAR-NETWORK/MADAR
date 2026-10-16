@@ -214,6 +214,8 @@ footer{color:var(--mute);font-size:12px;text-align:center;margin-top:18px}
       <p class="err" id="earn-off" hidden data-t="earn_not_connected"></p>
       <p class="hint" id="earn-gift" hidden data-t="earn_gift"></p>
       <p class="hint" id="earn-gift-wait" hidden data-t="earn_gift_wait"></p>
+      <!-- the node campaign: X/7 days toward a free .madar name, then a button to the claim page -->
+      <div id="earn-camp" hidden><p class="hint" id="earn-camp-text"></p><button class="primary" id="earn-camp-btn" hidden data-t="camp_btn"></button></div>
       <p class="hint" data-t="earn_kept"></p>
     </div>
   </section>
@@ -375,6 +377,12 @@ Object.assign(I18N.fr, {"earn_unit":"Orbits","earn_intro":"Liez ce nœud à votr
 Object.assign(I18N.es, {"earn_unit":"Orbits","earn_intro":"Vincula este nodo a tu billetera y reunirá Orbits por cada hora que funcione conectado: un día completo da 1 Orbit. El regalo de bienvenida de 1 Orbit se añade en cuanto el nodo empieza a contar.","earn_gift":"Incluye el regalo de bienvenida de 1 Orbit.","earn_rate":"1 Orbit por un día completo de funcionamiento.","earn_gift_wait":"El regalo de bienvenida de 1 Orbit se añade en la primera hora en que el nodo cuenta.","earn_kept":"Tus Orbits se guardan para ti; lo siguiente se anunciará más adelante."});
 Object.assign(I18N.tr, {"earn_unit":"Orbit","earn_intro":"Bu düğümü cüzdanınıza bağlayın; çalıştığı ve ağa bağlı kaldığı her saat için Orbit toplar: tam bir gün çalışma 1 Orbit verir. 1 Orbit hoş geldin hediyesi, düğüm sayılmaya başlar başlamaz eklenir.","earn_gift":"1 Orbit hoş geldin hediyesi dahildir.","earn_rate":"Tam bir gün çalışma için 1 Orbit.","earn_gift_wait":"1 Orbit hoş geldin hediyesi, düğümün sayıldığı ilk saat içinde eklenir.","earn_kept":"Orbit'leriniz sizin için saklanır; devamı daha sonra duyurulacak."});
 Object.assign(I18N.id, {"earn_unit":"Orbit","earn_intro":"Hubungkan node ini ke dompet Anda dan node akan mengumpulkan Orbit untuk setiap jam berjalan dan tetap terhubung: satu hari penuh memberi 1 Orbit. Hadiah sambutan 1 Orbit ditambahkan begitu node mulai dihitung.","earn_gift":"Termasuk hadiah sambutan 1 Orbit.","earn_rate":"1 Orbit untuk satu hari penuh berjalan.","earn_gift_wait":"Hadiah sambutan 1 Orbit ditambahkan dalam jam pertama node dihitung.","earn_kept":"Orbit Anda disimpan untuk Anda; kelanjutannya akan diumumkan nanti."});
+// the node campaign (2.0.13): X/7 days toward a free .madar name
+Object.assign(I18N.en, {camp_days:"{v} days toward your free .madar name",camp_ready:"You completed 7 days: your free .madar name is ready.",camp_btn:"Claim your free name",camp_claimed:"Your free name: {v}",camp_founder:"Founder #{v}"});
+Object.assign(I18N.fr, {camp_days:"{v} jours vers votre nom .madar gratuit",camp_ready:"Vous avez terminé 7 jours : votre nom .madar gratuit est prêt.",camp_btn:"Obtenir mon nom gratuit",camp_claimed:"Votre nom gratuit : {v}",camp_founder:"Fondateur n°{v}"});
+Object.assign(I18N.es, {camp_days:"{v} días para tu nombre .madar gratis",camp_ready:"Completaste 7 días: tu nombre .madar gratis está listo.",camp_btn:"Obtener mi nombre gratis",camp_claimed:"Tu nombre gratis: {v}",camp_founder:"Fundador #{v}"});
+Object.assign(I18N.tr, {camp_days:"Ücretsiz .madar adınıza {v} gün",camp_ready:"7 günü tamamladınız: ücretsiz .madar adınız hazır.",camp_btn:"Ücretsiz adımı al",camp_claimed:"Ücretsiz adınız: {v}",camp_founder:"Kurucu #{v}"});
+Object.assign(I18N.id, {camp_days:"{v} hari menuju nama .madar gratis Anda",camp_ready:"Anda menyelesaikan 7 hari: nama .madar gratis Anda siap.",camp_btn:"Ambil nama gratis saya",camp_claimed:"Nama gratis Anda: {v}",camp_founder:"Pendiri #{v}"});
 let LANG = "en", stopped = false, updating = false, built = false, lastStatus = null;
 
 const t = (k, v) => ((I18N[LANG] && I18N[LANG][k]) || I18N.en[k] || k).replace("{v}", v ?? "");
@@ -447,6 +455,14 @@ async function renderEarn() {
     $("earn-gift").hidden = !(me.gift && me.gift !== "0");
     $("earn-gift-wait").hidden = !me.gift_pending;
     $("earn-off").hidden = !v.not_connected;
+    // the campaign (from the service's «me»): only numbers from it, shown with textContent
+    const c = me.campaign;
+    $("earn-camp").hidden = !c;
+    if (c) {
+      const days = Math.min(Number(c.days_done) || 0, 7), founder = Number.isSafeInteger(c.founder) ? " · " + t("camp_founder", String(c.founder)) : "";
+      $("earn-camp-text").textContent = (c.claimed ? t("camp_claimed", String(c.name || "")) : c.eligible ? t("camp_ready") : t("camp_days", days + "/7")) + founder;
+      $("earn-camp-btn").hidden = !(c.eligible && !c.claimed);
+    }
   } else {
     $("earn-node-line").hidden = !v.node; $("earn-node").textContent = v.node || "";
     $("earn-wait").hidden = !v.waiting;
@@ -461,6 +477,9 @@ $("earn-link").addEventListener("click", async () => {
   if (!ok) { $("earn-err").textContent = t("e_" + (j.error || "service")); $("earn-link").disabled = false; return; }
   $("earn-url").textContent = j.link || ""; $("earn-wait").hidden = false;
 });
+
+// opens the campaign page (a fixed address) in the user's own browser, where Madar Wallet is
+$("earn-camp-btn").addEventListener("click", async () => { try { await post("/api/rewards/campaign"); } catch (_) {} });
 
 function showOff(title, hint) {
   ["hero-card", "acc-form", "acc-view", "settings", "earn-card"].forEach(s => $(s).hidden = true);

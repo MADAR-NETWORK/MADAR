@@ -18,7 +18,73 @@ pub fn build_signed(
 ) -> Result<Vec<u8>, String> {
     let nonce = next_nonce(t, &account.id())?;
     let p = fetch_params(t, ERA_PERIOD)?;
+    ensure_call_fits(&p, &call)?;
     Ok(sign_with(&p, account, call, nonce))
+}
+
+/// The last spec with `transaction_version` = 1. spec 9 raised it to 2 because calls were removed (Admission 2 and 3, and names v1); an old
+/// transaction for them does not decode after the upgrade.
+pub const LAST_SPEC_WITH_TX_V1: u32 = 8;
+/// `transaction_version` of a spec ≤ 8 chain.
+pub const LEGACY_TX_VERSION: u32 = 1;
+
+/// Does this tool serve a chain with this version? Its current version (tx 2, spec ≥ 9), **or** a spec ≤ 8 chain with tx 1: the committee signs the spec 9
+/// upgrade itself while the chain is still on 8, and operators renew their membership before the upgrade. On the old chain only calls whose
+/// encoding did not change are signed (`encodes_the_same_on_spec8`).
+pub fn tx_version_supported(spec: u32, txv: u32) -> bool {
+    txv == VERSION.transaction_version || is_legacy(spec, txv)
+}
+
+/// A chain before spec 9 (tx 1)?
+pub fn is_legacy(spec: u32, txv: u32) -> bool {
+    txv == LEGACY_TX_VERSION && spec <= LAST_SPEC_WITH_TX_V1
+}
+
+/// The calls whose **encoding and meaning did not change** from spec 8 to spec 9 (same Pallet index, call and fields) — only these are signed
+/// for a spec 8 chain. Everything else (including the two new calls that set the Admission parameters, and names and stamp) is explicitly refused there.
+pub fn encodes_the_same_on_spec8(call: &RuntimeCall) -> bool {
+    use madar_consensus::{
+        madar_admission::Call as A, madar_names::Call as N, pallet_grandpa, pallet_session,
+    };
+    match call {
+        RuntimeCall::Admission(
+            A::submit_admission_solution { .. }
+            | A::voluntary_exit {}
+            | A::approve_operator { .. }
+            | A::revoke_operator_approval { .. }
+            | A::vouch_node { .. }
+            | A::revoke_vouch { .. },
+        ) => true,
+        RuntimeCall::Session(
+            pallet_session::Call::set_keys { .. } | pallet_session::Call::purge_keys {},
+        ) => true,
+        RuntimeCall::Names(N::set_reserved { .. }) => true,
+        RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root { call }) => {
+            matches!(
+                &**call,
+                RuntimeCall::System(frame_system::Call::authorize_upgrade { .. })
+                    | RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled { .. })
+            )
+        }
+        RuntimeCall::UpgradeCommittee(pallet_collective::Call::propose { proposal, .. }) => {
+            encodes_the_same_on_spec8(proposal)
+        }
+        RuntimeCall::UpgradeCommittee(
+            pallet_collective::Call::vote { .. } | pallet_collective::Call::close { .. },
+        ) => true,
+        _ => false,
+    }
+}
+
+/// Refuses to sign a call that does not fit the chain version (a spec 9 call on a spec 8 chain).
+pub fn ensure_call_fits(p: &TxParams, call: &RuntimeCall) -> Result<(), String> {
+    if is_legacy(p.spec_version, p.transaction_version) && !encodes_the_same_on_spec8(call) {
+        return Err(format!(
+            "The network is still on version {} and this action needs version 9 — wait for the network upgrade and try again.",
+            p.spec_version
+        ));
+    }
+    Ok(())
 }
 
 /// The next sequence number (nonce) of an account (read from the node).
@@ -89,10 +155,10 @@ pub fn fetch_params(t: &dyn Transport, period: u64) -> Result<TxParams, String> 
         .get("transactionVersion")
         .and_then(|s| s.as_u64())
         .ok_or("Invalid network version")? as u32;
-    // The transaction structure itself follows transaction_version: if it changed, this tool may encode incorrectly — we do not sign.
-    if transaction_version != VERSION.transaction_version {
+    // The transaction format itself follows transaction_version: if it changed, this tool may encode wrongly — we do not sign (except the known spec ≤ 8 chain).
+    if !tx_version_supported(spec_version, transaction_version) {
         return Err(format!(
-            "The network's transaction structure has changed (tx {transaction_version} ≠ {}) — update madar-node before signing anything.",
+            "The network's transaction format (spec {spec_version}, tx {transaction_version}) does not fit this tool (tx {}) — update madar-node before any signing.",
             VERSION.transaction_version
         ));
     }
@@ -178,6 +244,84 @@ pub fn submit(t: &dyn Transport, account: &Account, call: RuntimeCall) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// spec 9 (tx 2): the tool serves its own tx version and a spec ≤ 8 chain (tx 1) — never a spec 9 chain with tx 1
+    /// or an unknown tx version.
+    #[test]
+    fn the_supported_chain_versions_are_exactly_current_and_spec8_legacy() {
+        assert_eq!(VERSION.transaction_version, 2);
+        assert!(tx_version_supported(
+            VERSION.spec_version,
+            VERSION.transaction_version
+        ));
+        assert!(
+            tx_version_supported(8, 1),
+            "the chain the spec 9 upgrade is signed on"
+        );
+        assert!(tx_version_supported(7, 1));
+        assert!(!tx_version_supported(9, 1));
+        assert!(!tx_version_supported(VERSION.spec_version, 3));
+        assert!(is_legacy(8, 1) && !is_legacy(9, 2));
+    }
+
+    /// On a spec 8 chain only calls whose encoding did not change are signed; the new spec 9 calls are refused.
+    #[test]
+    fn a_spec8_chain_gets_only_calls_that_encode_the_same() {
+        use madar_consensus::madar_admission;
+        let op = madar_consensus::AccountId::from([9u8; 32]);
+        let approve = RuntimeCall::Admission(madar_admission::Call::approve_operator {
+            operator: op.clone(),
+            max_votes: 1,
+        });
+        let upgrade =
+            RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root {
+                call: Box::new(RuntimeCall::System(frame_system::Call::authorize_upgrade {
+                    code_hash: H256::repeat_byte(1),
+                })),
+            });
+        let set_cap =
+            RuntimeCall::Admission(madar_admission::Call::set_admission_cap_per_round { cap: 3 });
+        let set_votes =
+            RuntimeCall::Admission(madar_admission::Call::set_max_votes_per_operator { votes: 2 });
+        let propose = |c: &RuntimeCall| {
+            RuntimeCall::UpgradeCommittee(pallet_collective::Call::propose {
+                threshold: 2,
+                proposal: Box::new(c.clone()),
+                length_bound: 100,
+            })
+        };
+        for ok in [&approve, &upgrade, &propose(&approve), &propose(&upgrade)] {
+            assert!(encodes_the_same_on_spec8(ok), "{ok:?}");
+        }
+        for new in [
+            &set_cap,
+            &set_votes,
+            &propose(&set_cap),
+            &propose(&set_votes),
+        ] {
+            assert!(!encodes_the_same_on_spec8(new), "{new:?}");
+        }
+        // the encodings the spec 8 chain expects (pallet 8 = Admission; approve_operator = 4, unchanged)
+        assert_eq!(&approve.encode()[..2], &[8, 4]);
+        let legacy = TxParams {
+            genesis: H256::zero(),
+            birth_hash: H256::zero(),
+            current: 1,
+            period: 128,
+            spec_version: 8,
+            transaction_version: 1,
+        };
+        assert!(ensure_call_fits(&legacy, &approve).is_ok());
+        assert!(ensure_call_fits(&legacy, &set_cap)
+            .unwrap_err()
+            .contains("version 9"));
+        let current = TxParams {
+            spec_version: VERSION.spec_version,
+            transaction_version: VERSION.transaction_version,
+            ..legacy
+        };
+        assert!(ensure_call_fits(&current, &set_cap).is_ok());
+    }
 
     /// The birth (as the Runtime computes it for `current`) is never the best block itself nor newer than its parent, and stays within the `BlockHashCount` window.
     #[test]

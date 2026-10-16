@@ -81,11 +81,12 @@ impl<'a> Reader<'a> {
             Some(_) => {},
         }
         // The signed transaction format is built into this executable: a change to it (transaction_version) requires a new tool; spec_version alone does not (that is the point of the API).
+        // spec 9: a spec ≤ 8 chain (tx 1) is accepted too — the encoding of the join calls did not change (`tx::encodes_the_same_on_spec8`).
         let tx = v
             .get("transactionVersion")
             .and_then(|s| s.as_u64())
             .unwrap_or(0) as u32;
-        if tx != VERSION.transaction_version {
+        if !super::tx::tx_version_supported(spec as u32, tx) {
             return Err(format!(
                 "transaction_version on the network ({tx}) ≠ the one this executable signs with ({}) — update madar-node before submitting anything.",
                 VERSION.transaction_version

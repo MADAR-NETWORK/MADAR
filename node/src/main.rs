@@ -14,6 +14,7 @@ mod doctor;
 mod join;
 mod names;
 mod rpc;
+mod sealed;
 mod service;
 mod stamp;
 

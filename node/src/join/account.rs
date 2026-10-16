@@ -25,19 +25,28 @@ impl Account {
     /// From a voting node's secret file (`key generate --output-type json`: field `secretPhrase`) — the key already lives on this machine
     /// because the node votes with it; reading it neither copies nor prints it (for automatic renewal of the genesis nodes).
     pub fn from_secret_json(path: &Path) -> Result<Account, String> {
-        let text = Zeroizing::new(
-            std::fs::read_to_string(path)
-                .map_err(|e| format!("Could not read {}: {e}", path.display()))?,
+        let bytes = Zeroizing::new(
+            std::fs::read(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?,
         );
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|_| "The secret file is not valid JSON".to_string())?;
-        let phrase = Zeroizing::new(
-            v.get("secretPhrase")
-                .and_then(|p| p.as_str())
-                .ok_or("The secret file has no secretPhrase")?
-                .to_string(),
-        );
-        let (pair, _) = sr25519::Pair::from_phrase(&phrase, None)
+        Self::from_secret_json_bytes(&bytes)
+    }
+
+    /// Like `from_secret_json` but from content in memory (for example after unsealing a DPAPI-sealed file, see `crate::sealed`).
+    /// Only the `secretPhrase` field is read, **borrowed** from the buffer (no copy in memory), and the other fields (`secretSeed` …) are ignored without copying them.
+    /// Error messages are fixed: they carry no part of the content.
+    pub fn from_secret_json_bytes(bytes: &[u8]) -> Result<Account, String> {
+        #[derive(serde::Deserialize)]
+        struct SecretJson<'a> {
+            #[serde(rename = "secretPhrase", borrow)]
+            secret_phrase: Option<&'a str>,
+        }
+        let f: SecretJson = serde_json::from_slice(bytes).map_err(|_| {
+            "The secret file is not valid JSON (or contains escape sequences)".to_string()
+        })?;
+        let phrase = f
+            .secret_phrase
+            .ok_or("The secret file has no secretPhrase")?;
+        let (pair, _) = sr25519::Pair::from_phrase(phrase, None)
             .map_err(|_| "The secret phrase in the file is invalid".to_string())?;
         Ok(Account { pair })
     }

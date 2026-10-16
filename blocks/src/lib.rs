@@ -71,8 +71,12 @@ pub const MADAR_EXTRINSIC_BASE_WEIGHT: Weight =
 
 parameter_types! {
     /// Wired through `frame_system::Config::BlockLength` in any real runtime.
-    pub MadarBlockLength: BlockLength =
-        BlockLength::max_with_normal_ratio(MAX_BLOCK_SIZE_BYTES, NORMAL_DISPATCH_RATIO);
+    /// spec 9 (F10): exactly the same value via the Builder (it was the deprecated `max_with_normal_ratio`): the full limit for all classes,
+    /// and Normal = `NORMAL_DISPATCH_RATIO` of it. Tested for equality with the old formula (`tests/block_limits.rs`).
+    pub MadarBlockLength: BlockLength = BlockLength::builder()
+        .max_length(MAX_BLOCK_SIZE_BYTES)
+        .modify_max_length_for_class(DispatchClass::Normal, |max| *max = NORMAL_DISPATCH_RATIO * MAX_BLOCK_SIZE_BYTES)
+        .build();
 
     /// Wired through `frame_system::Config::BlockWeights`.
     pub MadarBlockWeights: BlockWeights = BlockWeights::builder()

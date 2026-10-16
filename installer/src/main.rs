@@ -391,7 +391,7 @@ fn register_uninstall(dir: &Path, entries: &[Entry]) {
     }
 }
 
-const UNINSTALL_SUBKEY: &str = r"SoftwareMicrosoftWindowsCurrentVersionUninstallMADARNode";
+const UNINSTALL_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\MADARNode";
 /// HKEY_CURRENT_USER as the API wants it: (HKEY)(ULONG_PTR)(LONG)0x80000001.
 const HKCU: isize = 0x8000_0001u32 as i32 as isize;
 const KEY_WRITE: u32 = 0x2_0006;
@@ -910,5 +910,21 @@ mod registry_tests {
         let _ = Command::new("reg")
             .args(["delete", &format!(r"HKCU\{sub}"), "/f"])
             .output();
+    }
+
+    // regression (2026-10-16): the path once lost its backslashes, so the Apps entry went to a wrong key
+    #[test]
+    fn the_uninstall_entry_lives_under_the_real_windows_uninstall_key() {
+        assert_eq!(
+            super::UNINSTALL_SUBKEY.split('\\').collect::<Vec<_>>(),
+            [
+                "Software",
+                "Microsoft",
+                "Windows",
+                "CurrentVersion",
+                "Uninstall",
+                "MADARNode"
+            ]
+        );
     }
 }

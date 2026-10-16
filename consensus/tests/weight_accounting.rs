@@ -115,7 +115,7 @@ fn ban_writes_no_more_than_declared_even_when_the_offender_is_everywhere() {
     });
     ext.commit_all().unwrap();
     ext.execute_with(|| {
-        madar_admission::Pallet::<Runtime>::ban(&account(1)); // production ban path (Equivocation); `ban_key` is closed (N1)
+        madar_admission::Pallet::<Runtime>::ban(&account(1)); // the production ban path (Equivocation); `ban_key` was removed in spec 9
     });
     let w = written_keys(&ext);
     assert!(
@@ -125,8 +125,8 @@ fn ban_writes_no_more_than_declared_even_when_the_offender_is_everywhere() {
     );
 }
 
-// `dev_only_force_set_validators` is no longer callable in this Runtime (`AdminOrigin = EnsureNever`, N1),
-// so there is no write path to measure here; its rejection is proven in `tests/admin_calls_closed.rs`.
+// `dev_only_force_set_validators` was removed in spec 9 (it was closed since N1),
+// so there is no write path to measure here; its absence is proven in `tests/admin_calls_closed.rs`.
 
 #[test]
 fn new_session_writes_no_more_than_declared_in_the_worst_state() {
@@ -175,7 +175,7 @@ fn declared_weights_scale_with_set_sizes_and_stay_within_a_block() {
     let normal = block.get(DispatchClass::Normal).max_total.unwrap();
     for (name, w) in [
         ("voluntary_exit", W::voluntary_exit()),
-        ("ban_key", W::ban_key()),
+        ("ban", W::ban()),
         ("rejected_early", W::submit_admission_rejected_early()),
         ("submit", W::submit_admission_solution()),
     ] {
@@ -194,11 +194,11 @@ fn declared_weights_scale_with_set_sizes_and_stay_within_a_block() {
         "exit reads the whole validator list"
     );
     assert!(
-        W::ban_key().proof_size() > W::voluntary_exit().proof_size(),
+        W::ban().proof_size() > W::voluntary_exit().proof_size(),
         "ban also touches the pools"
     );
     // new_session (Mandatory) is weighed and registered: larger than any normal transaction but only once per Epoch.
-    assert!(W::new_session().ref_time() > W::ban_key().ref_time());
+    assert!(W::new_session().ref_time() > W::ban().ref_time());
 }
 
 /// Native/in-memory calibration only. No debug normalization and no claim of disk or WASM coverage.
@@ -241,7 +241,7 @@ fn worst_case_compute_time_is_covered_by_the_declared_ref_time() {
             let start = Instant::now();
             ext.execute_with(|| {
                 if scenario == "ban" {
-                    madar_admission::Pallet::<Runtime>::ban(&account(1)); // production ban path (Equivocation); `ban_key` is closed (N1)
+                    madar_admission::Pallet::<Runtime>::ban(&account(1)); // the production ban path (Equivocation); `ban_key` was removed in spec 9
                 } else {
                     let next = madar_admission::Pallet::<Runtime>::new_session(50).unwrap();
                     assert!(!next.is_empty());
@@ -258,7 +258,7 @@ fn worst_case_compute_time_is_covered_by_the_declared_ref_time() {
         }
         samples.sort_unstable();
         let (weight, ops) = if scenario == "ban" {
-            (W::ban_key(), W::ban_ops())
+            (W::ban(), W::ban_ops())
         } else {
             (W::new_session(), W::new_session_ops())
         };

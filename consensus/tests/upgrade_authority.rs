@@ -25,7 +25,7 @@ const ROOT_PROBE_KEY: &[u8] = b":madar:test:root-probe";
 /// A real Root-only call (`frame_system::set_storage`, `ensure_root`) —
 /// proves that `dispatch_as_root` actually produces a `Root` origin accepted by the
 /// `ensure_root` check inside a completely different Pallet, not merely a formal success of the outer
-/// call. (It used to be `dev_only_force_set_validators`, now closed in the Runtime — N1.)
+/// external one. (It was `dev_only_force_set_validators`, now removed — spec 9.)
 fn root_only_call() -> Box<RuntimeCall> {
     Box::new(RuntimeCall::System(frame_system::Call::set_storage {
         items: vec![(ROOT_PROBE_KEY.to_vec(), b"executed".to_vec())],

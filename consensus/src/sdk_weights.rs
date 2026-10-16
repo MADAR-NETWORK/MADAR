@@ -7,10 +7,12 @@
 //! SDK `()` weights count reads/writes with their built-in `RocksDbWeight` constants, not MADAR's own `DbWeight`, and
 //! their execution part is only ~1× of what was measured here (no 2× margin).
 //!
-//! What was not measured keeps the SDK weight unchanged: the `pallet_collective` `vote`/`close_*` calls (the SDK
-//! benchmark needs 4+ members and MADAR fixes them at 3), and BABE `plan_config_change` (closed: Root only).
+//! spec 9: `pallet_collective` `vote`/`close_*` (the SDK benchmark needs 4+ members and Madar fixes them at 3) and `pallet_session`
+//! `set_keys`/`purge_keys` were measured with Madar's own benchmarks (`consensus/src/benchmarks.rs`: `madar_committee`, `madar_session_keys`)
+//! — see the spec 9 weights report. What remains at the SDK weight: `plan_config_change` in BABE (closed: Root only).
 
 use crate::Runtime;
+use frame_support::traits::Get;
 use frame_support::weights::Weight;
 
 type Db = <Runtime as frame_system::Config>::DbWeight;
@@ -156,8 +158,8 @@ impl pallet_balances::WeightInfo for BalancesWeights {
     }
 }
 
-/// `pallet_collective` (the upgrade committee). `vote` and `close_*` were not measured (see the file header), so they
-/// keep the SDK weight.
+/// `pallet_collective` (the upgrade committee, 3 fixed members). `vote`/`close_*` measured with m = 3 (spec 9); the floor is computed at
+/// m = 3 always (`MaxMembers` = 3), with `p` up to `MaxProposals` and `b` the proposal length.
 pub struct CollectiveWeights;
 impl pallet_collective::WeightInfo for CollectiveWeights {
     fn set_members(m: u32, n: u32, p: u32) -> Weight {
@@ -197,19 +199,40 @@ impl pallet_collective::WeightInfo for CollectiveWeights {
         ))
     }
     fn vote(m: u32) -> Weight {
-        <() as pallet_collective::WeightInfo>::vote(m)
+        <() as pallet_collective::WeightInfo>::vote(m).max(floor(VOTE_EXEC_PS, 2, 1, VOTE_PROOF))
     }
     fn close_early_disapproved(m: u32, p: u32) -> Weight {
-        <() as pallet_collective::WeightInfo>::close_early_disapproved(m, p)
+        let pp = p as u64;
+        <() as pallet_collective::WeightInfo>::close_early_disapproved(m, p).max(floor_c(
+            CLOSE_DISAPPROVED_EXEC_PS + CLOSE_PER_P_PS * pp,
+            3,
+            3,
+            CLOSE_PROOF + CLOSE_PROOF_PER_P * pp,
+        ))
     }
     fn close_early_approved(b: u32, m: u32, p: u32) -> Weight {
-        <() as pallet_collective::WeightInfo>::close_early_approved(b, m, p)
+        let (bb, pp) = (b as u64, p as u64);
+        <() as pallet_collective::WeightInfo>::close_early_approved(b, m, p).max(floor_c(
+            CLOSE_APPROVED_EXEC_PS + CLOSE_PER_B_PS * bb + CLOSE_PER_P_PS * pp,
+            4,
+            3,
+            CLOSE_PROOF + bb + CLOSE_PROOF_PER_P * pp,
+        ))
     }
     fn close_disapproved(m: u32, p: u32) -> Weight {
-        <() as pallet_collective::WeightInfo>::close_disapproved(m, p)
+        let pp = p as u64;
+        <() as pallet_collective::WeightInfo>::close_disapproved(m, p).max(floor_c(
+            CLOSE_DISAPPROVED_EXEC_PS + CLOSE_PER_P_PS * pp,
+            4,
+            3,
+            CLOSE_PROOF + CLOSE_PROOF_PER_P * pp,
+        ))
     }
+    /// unreachable in Madar (`PrimeDefaultVote` with no Prime ⇒ abstention is "no", so approval after the deadline = the early approval
+    /// itself); even so, it reserves the measured early-approval weight.
     fn close_approved(b: u32, m: u32, p: u32) -> Weight {
         <() as pallet_collective::WeightInfo>::close_approved(b, m, p)
+            .max(Self::close_early_approved(b, m, p))
     }
     fn disapprove_proposal(p: u32) -> Weight {
         let pp = p as u64;
@@ -235,10 +258,60 @@ impl pallet_collective::WeightInfo for CollectiveWeights {
     }
 }
 
-/// B1: the equivocation proof check measured 70 µs (BABE) and 60 µs (GRANDPA), and the ban in MADAR
-/// (`Admission::ban`) 84 µs; the SDK weight reserves 95 + 110 µs for them. We add 110 µs so the reservation is >= 2× the
-/// measurement: (95 + 110 + 110) >= 2 × (70 + 84).
+/// B1: Equivocation proof verification measured 70 µs (BABE) and 60 µs (GRANDPA); the SDK weight reserves 95 + 110 µs for verification, and we add 110 µs
+/// (≥ 2× the verification). spec 9: **the full penalty weight** is added on top (`ban_and_disable`): the declared weight of `Admission::ban` +
+/// the measured disabling floor (`madar_session_transition::ban_and_disable`). Before this, the 84 µs ban was covered by the 110 µs alone.
 const EQUIVOCATION_EXTRA_PS: u64 = 110_000_000;
+
+/// spec 9: the penalty weight (`crate::ban_and_disable`) inside the Equivocation report.
+pub fn equivocation_penalty() -> Weight {
+    use madar_admission::weights::WeightInfo;
+    let v = <<Runtime as madar_admission::Config>::MaxValidators as Get<u32>>::get() as u64;
+    // Disabling: read Session::Validators, DisabledValidators, Admission::Validators and BannedKeys (at most twice: the banned validator remaining
+    // in Admission is only the kept last one) + write DisabledValidators, the event and the Digest. The scan uses sorted sets (O(n log n)).
+    let disable = floor(
+        DISABLE_EXEC_PS + DISABLE_PER_VALIDATOR_PS * v,
+        5,
+        4,
+        2 * (v * 32 + 8) + v * 48,
+    );
+    <Runtime as madar_admission::Config>::WeightInfo::ban().saturating_add(disable)
+}
+
+// spec 9 — Madar measurements (WASM compiled, i7-12700KF, 50 steps × 20; spec 9 weights report), rounded up.
+// `floor` doubles them (2×), and `floor_c` (when following a component) 2.2×.
+/// `vote` (m = 3): measured 15.35 + 0.216·p µs ⇒ 18.8 µs at p = 16; proof 314 + 27·p.
+const VOTE_EXEC_PS: u64 = 40_000_000; // spec 9 final (2026-10-16): 32.2 us measured at p = 16
+const VOTE_PROOF: u64 = 4_000;
+/// `close_early_disapproved` 22.0 + 0.366·p and `close_disapproved` 23.6 + 0.355·p µs (m = 3).
+const CLOSE_DISAPPROVED_EXEC_PS: u64 = 42_000_000; // spec 9 final: 50.1 us measured at p = 16
+/// `close_early_approved` (m = 3, a `remark` proposal up to 1024 bytes): 31.4 + 0.53·p µs, and the length has no measured effect.
+const CLOSE_APPROVED_EXEC_PS: u64 = 60_000_000; // spec 9 final: 69.9 us measured at p = 16, b = 1024
+const CLOSE_PER_B_PS: u64 = 2_000;
+const CLOSE_PER_P_PS: u64 = 550_000;
+/// The measured proof up to 344 + b + 86·p.
+const CLOSE_PROOF: u64 = 5_000;
+const CLOSE_PROOF_PER_P: u64 = 96;
+/// `ban_and_disable` (worst scan: 1000 active members, 332 disabled, all outside Admission except one producer): 106.5 µs including the ban
+/// (with a small set); the ban alone with a full set is 75.1 µs (`madar_admission::ban`, declared separately). 60 + 0.1·n µs ⇒ 160 µs × 2.
+const DISABLE_EXEC_PS: u64 = 60_000_000;
+const DISABLE_PER_VALIDATOR_PS: u64 = 100_000;
+/// `set_keys` (two keys BABE + GRANDPA with ownership proof verification): first registration 137.4 µs (4 r / 4 w), replacement 127.3 µs (4 r /
+/// 5 w, proof 398); `purge_keys` 46.4 µs (4 r / 5 w, proof 379).
+const SET_KEYS_EXEC_PS: u64 = 170_000_000; // spec 9 final: replace 225.8 us (4 r / 5 w) measured
+const PURGE_KEYS_EXEC_PS: u64 = 50_000_000;
+
+/// `pallet_session` (spec 9, it was `()` with no Madar floor).
+pub struct SessionWeights;
+impl pallet_session::WeightInfo for SessionWeights {
+    fn set_keys() -> Weight {
+        // NextKeys, KeyOwner ×4 (remove the old + insert the new), System::Account (consumers), Holds (the deposit is zero).
+        <() as pallet_session::WeightInfo>::set_keys().max(floor(SET_KEYS_EXEC_PS, 6, 6, 6_000))
+    }
+    fn purge_keys() -> Weight {
+        <() as pallet_session::WeightInfo>::purge_keys().max(floor(PURGE_KEYS_EXEC_PS, 4, 5, 6_000))
+    }
+}
 
 /// `pallet_grandpa`.
 pub struct GrandpaWeights;
@@ -249,6 +322,7 @@ impl pallet_grandpa::WeightInfo for GrandpaWeights {
             max_nominators_per_validator,
         )
         .saturating_add(Weight::from_parts(EQUIVOCATION_EXTRA_PS, 0))
+        .saturating_add(equivocation_penalty())
     }
     fn note_stalled() -> Weight {
         <() as pallet_grandpa::WeightInfo>::note_stalled().max(floor(2_600_000, 0, 1, 0))
@@ -267,5 +341,6 @@ impl pallet_babe::WeightInfo for BabeWeights {
             max_nominators_per_validator,
         )
         .saturating_add(Weight::from_parts(EQUIVOCATION_EXTRA_PS, 0))
+        .saturating_add(equivocation_penalty())
     }
 }

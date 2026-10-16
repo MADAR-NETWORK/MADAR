@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `madar-node committee`: two more 2-of-3 committee decisions for spec 9, `prepare-admission-params` (`--cap`: new admissions per rotation, or `--max-votes`: votes per operator, both within the runtime's hard limits) and `prepare-legacy-sunset` (the deadline for old v1 signed messages in Madar Names or Madar Stamp: `--stop-now`, or `--until-ms` to shorten or extend by at most 7 days). Both are refused on a chain older than spec 9. The tool built from spec 9 (transaction version 2) can still sign, for a spec 8 chain (transaction version 1), the calls whose encoding did not change, so the committee can approve the upgrade itself.
+- `madar-node secret seal` / `secret check` (Windows): seals the voting node's secret file with DPAPI (`CurrentUser` by default, optional `LocalMachine`), reads the sealed file back to verify it, and with `--shred` overwrites and deletes the plain file only after that check. `join auto-renew --sealed-secret-file` unseals it in memory only. DPAPI is called directly through `crypt32`, not through PowerShell.
+- `madar-node names`: v2 messages (`sale-message --v2`, `--genesis`, `--valid-until`), `names transfer` with the owner's and the new wallet's signatures, and the spec 9 payment networks. `madar-node stamp` sends `stamp_v2` when the signatures carry `valid_until`.
+- Desktop node app 2.0.13: an optional card that shows progress toward a free `.madar` name for nodes that stay online for 7 days; its button opens one fixed page on madar-network.com in the user's own browser.
+
+### Changed
+- Desktop node app 2.0.13: the self-heal guard also restarts the node when it is at least 40 blocks behind the network and its best block has not moved for 10 minutes (before, a node with a single peer that sent no blocks could stay stuck). The best-block timer is updated by the background monitor, so the guard works with the window closed.
+
+### Fixed
+- Installer 2.0.13: the Windows uninstall registry path had lost its backslashes, so the "Apps" entry was written to a wrong key and kept showing an old version. Fixed, with a regression test.
+
+### Added
 - FRAME benchmarks for every MADAR pallet and a runtime-level session-rotation benchmark, behind the `runtime-benchmarks` feature (off by default, never part of a production build). `madar-node benchmark pallet|overhead|storage|machine` is available only in such a build.
 - `madar-node committee`: two new 2-of-3 committee decisions, `names-reserve` (reserve or release a name in Madar Names) and `recover-finality` (recover stalled finality through `Grandpa::note_stalled`, refused while finality still runs or while a dead voter is still in the next session's set). Members sign only what the encoded call itself says; a request whose description does not match its call is refused.
 - `madar-node join apply` checks that an approved operator has vouched for the account before solving the puzzle, and `join auto-renew --reapply` waits instead of applying while the account is not vouched.
@@ -32,14 +44,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - First public release of the source code.
 - `LICENSE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `GETTING_STARTED.md`, `ROADMAP.md`, `ARCHITECTURE.md`, and issue / pull request templates.
 
-## Runtime spec 9 — operator vouching and measured weights
+## Runtime spec 9 — v2 signatures, name transfer, admission limits and offender disabling
+
+`spec_version` 9, `transaction_version` 2 (calls were removed, so a transaction signed for a removed call before the upgrade does not decode after it).
+
+### Added
+- Names and Stamp: v2 signed messages. Every v2 message ends with `network: 0x<hash of block 0>` and `valid until: <UTC ms>`, so a signature cannot be used on another network or after its deadline. New calls: `register_v2`, `lock_sale_v3`, `cancel_offer_v2`, `stamp_v2`.
+- Names: `transfer` moves a name to another wallet with two signatures (the owner's transfer message naming the new wallet, and the new wallet's acceptance); the term and registration date stay unchanged and open offers and locks are dropped. `reassign` lets the 2-of-3 committee return a name to its rightful owner after a proven dispute, with a public reason.
+- Names: more payment networks for the safe sale (USDC and USDT on Ethereum, Optimism, Polygon and BSC), appended after the five original ones. The v2 sale lock requires a receiving address that is fully valid for its network, and the buyer's acceptance cannot outlive the lock.
+- Names: `on_idle` removes expired locks and old v1 locks, a bounded number per block and only when the block has room for the worst case.
+- Admission: the cap on new admissions per rotation (default 2, hard limit 16, 0 pauses new admissions) and the cap on votes per operator (default 1, hard limit 4) are stored on chain and can be changed by the 2-of-3 committee within those limits. Lowering a cap evicts nobody.
+- Admission: an operator never holds more than `floor((n-1)/3)` of `n` voters (at least 1), on top of its own cap and the committee cap, at the draw and when vouching.
+- Admission: at most 3 Argon2 checks per account per round (renewals are counted on the member itself). A wrong solution from a vouched node is now counted as a successful transaction with an event, so its nonce advances and it cannot be replayed for free; extra attempts and unvouched candidates are refused before Argon2.
+- Offenders proven by an equivocation report are disabled in BABE immediately (their blocks are rejected), not only after two session rotations. Never more than `floor((n-1)/3)` validators are disabled, and the last remaining producer is never disabled.
 
 ### Changed
+- Old v1 messages (Names `register`, `cancel_offer`, `lock_sale_v2`, and Stamp `stamp`) are accepted for 72 hours after the upgrade and then refused automatically. The committee can shorten this deadline at any time, or extend it by at most 7 days per decision (`set_legacy_accepted_until`).
 - Admission: a candidate must be vouched for by an approved operator before it applies. An unvouched candidacy is refused at submission, before the Argon2 check (`NodeNotVouched`), and only vouched candidates enter the draw; a skipped candidate gets an explicit event.
 - Admission: the draw also skips candidates whose operator has no room left under its vote cap, so such a winner no longer wastes a round seat.
 - An approved operator that has no account yet can create it with its first vouch (only operators approved by the 2-of-3 committee).
 - Weights measured with FRAME benchmarks (B1): every declared weight is at least twice the measured median on the worst path, and the block base cost and the per-transaction base cost are measured for MADAR instead of the SDK defaults. The SDK pallets use the larger of the SDK weight and a floor measured on MADAR.
+- Final spec 9 weights re-measured after the review fixes; every declared weight stays at least twice the measured value.
+
+### Removed
+- Admission: the closed admin calls `ban_key` (index 2) and `dev_only_force_set_validators` (index 3). Their indices are not reused; banning happens only through equivocation reports.
 - Names: the v1 safe-sale calls `lock_sale` (index 6) and `complete_sale` (index 7), disabled since spec 8, are removed. Their indices are not reused and storage is unchanged.
+- The one-time seeding migrations `SeedFirstStamper` (spec 6) and `SeedNames` (spec 7), which had already run and were no-ops.
 
 ## Runtime spec 8 — payment proof for the safe sale
 

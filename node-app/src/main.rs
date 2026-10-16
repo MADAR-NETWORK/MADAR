@@ -1254,6 +1254,10 @@ struct State {
     last_self_heal: Option<Instant>,
 }
 
+/// Stall guard (pure, tested): a node running for at least 10 minutes, and **its finalized block stuck for 10 minutes while its head advances** (gap ≥ 40 blocks),
+/// or **no peers for 10 minutes**, or **behind the network with its head not advancing for 10 minutes** (the network at least 40 blocks ahead; incident
+/// 2026-10-15: a node stayed stuck with a single peer that sent no blocks for almost a day) ⇒ restarted once, and not more than once every 30 minutes. (Incident 2026-09-28: the machine's clock drifted 9 seconds and the node got stuck
+/// in an old voting round and its finality stayed stuck for hours until it was restarted manually.)
 pub fn is_stuck(uptime: Duration, best_unchanged: Duration) -> bool {
     uptime >= STUCK_AFTER && best_unchanged >= STUCK_AFTER
 }
@@ -1267,6 +1271,7 @@ pub fn should_self_heal(
     finalized_still: Duration,
     no_peers_for: Option<Duration>,
     since_last_heal: Option<Duration>,
+    behind_stalled: Option<Duration>,
 ) -> bool {
     const TEN_MIN: Duration = Duration::from_secs(600);
     if uptime < TEN_MIN
@@ -1278,7 +1283,8 @@ pub fn should_self_heal(
     }
     let finality_stuck = lag.map(|l| l >= 40).unwrap_or(false) && finalized_still >= TEN_MIN;
     let isolated = no_peers_for.map(|d| d >= TEN_MIN).unwrap_or(false);
-    finality_stuck || isolated
+    let stalled = behind_stalled.map(|d| d >= TEN_MIN).unwrap_or(false);
+    finality_stuck || isolated || stalled
 }
 
 fn load_account(p: &Paths) -> Option<Account> {
@@ -2088,6 +2094,11 @@ fn monitor_tick(
     } else {
         (None, None)
     };
+    // When the head last advanced: updated here too (not only from the window), so the "behind and stalled" guard works with the window closed.
+    if best.is_some() && best != st.last_best {
+        st.last_best = best;
+        st.last_best_change = Instant::now();
+    }
     if let Some(b) = best {
         if let Some(prev) = st.last_counted_best {
             if b > prev {
@@ -2140,14 +2151,20 @@ fn monitor_tick(
             (Some(b), Some(f)) => Some(b.saturating_sub(f)),
             _ => None,
         };
+        // Behind the network (the highest block its peers know is at least 40 ahead) and its head not advancing: since when?
+        let highest =
+            rpc(rpc_port, "system_syncState", json!([])).and_then(|s| s["highestBlock"].as_u64());
+        let behind = matches!((best, highest), (Some(b), Some(h)) if h >= b.saturating_add(40));
+        let behind_stalled = behind.then(|| st.last_best_change.elapsed());
         if should_self_heal(
             st.node_started.elapsed(),
             lag,
             st.last_finalized_change.elapsed(),
             st.no_peers_since.map(|t| t.elapsed()),
             st.last_self_heal.map(|t| t.elapsed()),
+            behind_stalled,
         ) {
-            log(p, &format!("self-heal: finality lag {lag:?}, finalized unchanged {}s, no peers {:?} — restarting the node", st.last_finalized_change.elapsed().as_secs(), st.no_peers_since.map(|t| t.elapsed().as_secs())));
+            log(p, &format!("self-heal: finality lag {lag:?}, finalized unchanged {}s, no peers {:?}, behind and stalled {:?}s — restarting the node", st.last_finalized_change.elapsed().as_secs(), st.no_peers_since.map(|t| t.elapsed().as_secs()), behind_stalled.map(|d| d.as_secs())));
             st.last_self_heal = Some(Instant::now());
             st.no_peers_since = None;
             st.last_finalized_change = Instant::now();
@@ -2653,6 +2670,11 @@ fn handle(mut s: TcpStream, state: &Arc<Mutex<State>>) {
                 "waiting": waiting && !rs["linked"].as_bool().unwrap_or(false), "link": if waiting { rs["link"].clone() } else { Value::Null }}),
             );
         }
+        // the node campaign: the free-name page in the user's own browser (a fixed address, never one from a reply)
+        ("POST", "/api/rewards/campaign") if token_ok => {
+            open_default_browser(rewards::CAMPAIGN_URL);
+            respond_json(&mut s, "200 OK", json!({"ok": true}));
+        }
         // "Link your wallet": a one-time code from the service, then the link page in the user's own browser
         ("POST", "/api/rewards/link") if token_ok => {
             let cfg = load_config(&p);
@@ -2805,31 +2827,67 @@ mod tests {
     fn a_stuck_or_isolated_node_is_restarted_but_not_too_early_or_too_often() {
         let m = |x: u64| Duration::from_secs(x * 60);
         // The incident: finality stuck for hours while the head advances => restart.
-        assert!(should_self_heal(m(300), Some(2200), m(240), None, None));
+        assert!(should_self_heal(
+            m(300),
+            Some(2200),
+            m(240),
+            None,
+            None,
+            None
+        ));
         // No peers for 10 minutes => restart.
-        assert!(should_self_heal(m(60), Some(0), m(0), Some(m(10)), None));
+        assert!(should_self_heal(
+            m(60),
+            Some(0),
+            m(0),
+            Some(m(10)),
+            None,
+            None
+        ));
         // Healthy: small gap or finality moving.
-        assert!(!should_self_heal(m(60), Some(3), m(30), None, None));
+        assert!(!should_self_heal(m(60), Some(3), m(30), None, None, None));
         assert!(
-            !should_self_heal(m(60), Some(500), m(2), None, None),
+            !should_self_heal(m(60), Some(500), m(2), None, None, None),
             "finality moving, just catching up"
         );
         // Just started, or restarted less than 30 minutes ago => wait.
-        assert!(!should_self_heal(m(5), Some(2200), m(240), None, None));
+        assert!(!should_self_heal(
+            m(5),
+            Some(2200),
+            m(240),
+            None,
+            None,
+            None
+        ));
         assert!(!should_self_heal(
             m(300),
             Some(2200),
             m(240),
             None,
-            Some(m(20))
+            Some(m(20)),
+            None
         ));
         assert!(should_self_heal(
             m(300),
             Some(2200),
             m(240),
             None,
-            Some(m(31))
+            Some(m(31)),
+            None
         ));
+        // Incident 2026-10-15: one peer, finalized = head (gap 0), but the network is 10 thousand blocks ahead and the head is stuck ⇒ restart after 10 minutes.
+        assert!(should_self_heal(
+            m(60),
+            Some(0),
+            m(60),
+            None,
+            None,
+            Some(m(10))
+        ));
+        assert!(
+            !should_self_heal(m(60), Some(0), m(60), None, None, Some(m(5))),
+            "behind but still moving recently"
+        );
     }
 
     #[test]

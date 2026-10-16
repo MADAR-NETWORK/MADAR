@@ -22,7 +22,6 @@ fn bench_declared_weights() {
     {
         use madar_admission::weights::WeightInfo;
         type W = <Runtime as madar_admission::Config>::WeightInfo;
-        let max_v = <<Runtime as madar_admission::Config>::MaxValidators as Get<u32>>::get();
         p(
             "madar_admission",
             "submit_admission_solution",
@@ -34,12 +33,7 @@ fn bench_declared_weights() {
             W::submit_admission_rejected_early(),
         );
         p("madar_admission", "voluntary_exit", W::voluntary_exit());
-        p("madar_admission", "ban_key", W::ban_key());
-        p(
-            "madar_admission",
-            "dev_only_force_set_validators",
-            W::dev_only_force_set_validators(max_v),
-        );
+        p("madar_admission", "ban", W::ban());
         p("madar_admission", "new_session", W::new_session());
         p("madar_admission", "on_initialize", W::on_initialize());
         p("madar_admission", "approve_operator", W::approve_operator());
@@ -50,6 +44,11 @@ fn bench_declared_weights() {
         );
         p("madar_admission", "vouch_node", W::vouch_node());
         p("madar_admission", "revoke_vouch", W::revoke_vouch());
+        p(
+            "madar_admission",
+            "set_admission_param",
+            W::set_admission_param(),
+        );
     }
     {
         use madar_names::weights::WeightInfo;
@@ -60,6 +59,12 @@ fn bench_declared_weights() {
         p("madar_names", "revoke", W::revoke());
         p("madar_names", "sale_v2", W::sale_v2());
         p("madar_names", "complete_v2", W::complete_v2());
+        p("madar_names", "register_v2", W::register_v2());
+        p("madar_names", "sale_v3", W::sale_v3());
+        p("madar_names", "cancel_v2", W::cancel_v2());
+        p("madar_names", "transfer", W::transfer());
+        p("madar_names", "reassign", W::reassign());
+        p("madar_names", "cleanup", W::cleanup());
     }
     {
         use madar_stamp::weights::WeightInfo;
@@ -68,6 +73,8 @@ fn bench_declared_weights() {
         p("madar_stamp", "stamp(1)", W::stamp(1));
         p("madar_stamp", "stamp(max)", W::stamp(max_b));
         p("madar_stamp", "set_stamper", W::set_stamper());
+        p("madar_stamp", "stamp_v2(1)", W::stamp_v2(1));
+        p("madar_stamp", "stamp_v2(max)", W::stamp_v2(max_b));
     }
     {
         use madar_upgrade_authority::weights::WeightInfo;
@@ -231,6 +238,18 @@ fn bench_declared_weights() {
             "pallet_babe",
             "report_equivocation(1000,0)",
             W::report_equivocation(1000, 0),
+        );
+    }
+    {
+        // spec 9: session keys and the penalty inside an equivocation report (ban + BABE disabling)
+        use pallet_session::WeightInfo;
+        type W = <Runtime as pallet_session::Config>::WeightInfo;
+        p("pallet_session", "set_keys", W::set_keys());
+        p("pallet_session", "purge_keys", W::purge_keys());
+        p(
+            "madar_session_transition",
+            "ban_and_disable",
+            madar_consensus::sdk_weights::equivocation_penalty(),
         );
     }
     {

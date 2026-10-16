@@ -56,6 +56,9 @@ pub struct SubmitArgs {
     /// Without it, the batch is read from stdin.
     #[arg(long)]
     pub batch: Option<PathBuf>,
+    /// (spec 9) Sends `stamp_v2`: every signature contains "valid_until" (inside proof or in the entry itself). Automatic if a v2 signature is present.
+    #[arg(long)]
+    pub v2: bool,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -121,6 +124,59 @@ pub fn parse_entries(v: &Value) -> Result<Vec<Entry>, String> {
         .collect()
 }
 
+/// (spec 9) The signature deadline of a v2 entry: `valid_until` in the entry or inside proof; None = a v1 entry (or unsigned).
+fn entry_until(e: &Value) -> Result<Option<u64>, String> {
+    let v = if e["valid_until"].is_null() {
+        &e["proof"]["valid_until"]
+    } else {
+        &e["valid_until"]
+    };
+    match v {
+        Value::Null => Ok(None),
+        x => x
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| "valid_until: a number (UTC milliseconds)".to_string()),
+    }
+}
+
+/// The batch as a call: `stamp` (v1) or `stamp_v2`. v1 and v2 signatures are not mixed in one batch; an unsigned entry fits both.
+pub fn batch_call(v: &Value, force_v2: bool) -> Result<RuntimeCall, String> {
+    let entries = parse_entries(v)?;
+    if entries.is_empty() {
+        return Err("The batch is empty".into());
+    }
+    let arr = v.as_array().ok_or("The batch must be a JSON array")?;
+    let untils = arr.iter().map(entry_until).collect::<Result<Vec<_>, _>>()?;
+    let any_v2 = untils.iter().any(Option::is_some);
+    if !(force_v2 || any_v2) {
+        let bounded = entries
+            .try_into()
+            .map_err(|_| "The batch exceeds the allowed limit (50) or is empty".to_string())?;
+        return Ok(RuntimeCall::Stamp(madar_stamp::Call::stamp {
+            entries: bounded,
+        }));
+    }
+    let mut v2 = Vec::with_capacity(entries.len());
+    for (e, until) in entries.into_iter().zip(untils) {
+        if e.proof.is_some() && until.is_none() {
+            return Err("A v2 batch contains a v1 signature (without valid_until): send it in a separate batch".into());
+        }
+        v2.push(madar_stamp::EntryV2 {
+            fingerprint: e.fingerprint,
+            name_hash: e.name_hash,
+            proof: e.proof,
+            valid_until: until.unwrap_or(0),
+        });
+    }
+    let bounded = v2
+        .try_into()
+        .map_err(|_| "The batch exceeds the allowed limit (50) or is empty".to_string())?;
+    Ok(RuntimeCall::Stamp(madar_stamp::Call::stamp_v2 {
+        entries: bounded,
+    }))
+}
+
 fn submit(a: SubmitArgs) -> Result<(), String> {
     let mut stdin = String::new();
     let pass = if a.passphrase_stdin {
@@ -146,18 +202,13 @@ fn submit(a: SubmitArgs) -> Result<(), String> {
             s
         }
     };
-    let entries =
-        parse_entries(&serde_json::from_str(&raw).map_err(|e| format!("Invalid JSON: {e}"))?)?;
-    let bounded = entries
-        .try_into()
-        .map_err(|_| "The batch exceeds the allowed limit (50) or is empty".to_string())?;
+    let call = batch_call(
+        &serde_json::from_str(&raw).map_err(|e| format!("Invalid JSON: {e}"))?,
+        a.v2,
+    )?;
     let acct: Account = Account::load(&a.account_file, &pass)?;
     let t = HttpRpc::new(&a.rpc);
-    let hash = tx::submit(
-        &t,
-        &acct,
-        RuntimeCall::Stamp(madar_stamp::Call::stamp { entries: bounded }),
-    )?;
+    let hash = tx::submit(&t, &acct, call)?;
     println!(
         "{}",
         json!({ "tx": hash, "stamper": acct.id().to_ss58check() })
@@ -253,6 +304,45 @@ mod tests {
             parse_entries(&json!([{ "fingerprint": "ab", "name_hash": null, "proof": null }]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn v2_batches_go_to_stamp_v2_and_never_mix_with_v1_signatures() {
+        let evm = |until: Option<u64>| {
+            let mut p = json!({ "evm": { "address": format!("0x{}", "03".repeat(20)), "signature": "04".repeat(65) } });
+            if let Some(u) = until {
+                p["valid_until"] = json!(u);
+            }
+            p
+        };
+        let plain = json!({ "fingerprint": "01".repeat(32), "name_hash": null, "proof": null });
+        let v1 = json!({ "fingerprint": "02".repeat(32), "name_hash": null, "proof": evm(None) });
+        let v2 =
+            json!({ "fingerprint": "03".repeat(32), "name_hash": null, "proof": evm(Some(77)) });
+        let top = json!({ "fingerprint": "04".repeat(32), "name_hash": null, "proof": evm(None), "valid_until": 78 });
+        assert!(matches!(
+            batch_call(&json!([plain.clone(), v1.clone()]), false).unwrap(),
+            RuntimeCall::Stamp(madar_stamp::Call::stamp { .. })
+        ));
+        match batch_call(&json!([plain.clone(), v2.clone(), top]), false).unwrap() {
+            RuntimeCall::Stamp(madar_stamp::Call::stamp_v2 { entries }) => {
+                assert_eq!(
+                    entries.iter().map(|e| e.valid_until).collect::<Vec<_>>(),
+                    vec![0, 77, 78]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            batch_call(&json!([plain.clone()]), true).unwrap(),
+            RuntimeCall::Stamp(madar_stamp::Call::stamp_v2 { .. })
+        ));
+        assert!(
+            batch_call(&json!([v1.clone(), v2]), false).is_err(),
+            "v1 and v2 signatures in one batch"
+        );
+        assert!(batch_call(&json!([v1]), true).is_err());
+        assert!(batch_call(&json!([]), true).is_err());
     }
 
     /// Backup prefix = twox128("Stamp") ++ twox128("Stamps") — follows the pallet name in the Runtime.

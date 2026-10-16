@@ -166,6 +166,13 @@ pub fn run() -> sc_cli::Result<()> {
             }
             Ok(())
         }
+        Some(Subcommand::Secret(cmd)) => {
+            if let Err(e) = crate::sealed::run(cmd.clone()) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Some(Subcommand::Join(cmd)) => {
             // A readable message (Debug escapes non-ASCII text), and a non-zero exit code on failure.
             if let Err(e) = crate::join::run(cmd.clone()) {

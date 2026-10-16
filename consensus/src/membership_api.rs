@@ -31,7 +31,7 @@ pub fn params() -> AdmissionParamsV1 {
         max_validators: <Runtime as madar_admission::Config>::MaxValidators::get(),
         max_candidates_per_round: <Runtime as madar_admission::Config>::MaxCandidatesPerRound::get(
         ),
-        admission_cap_per_round: <Runtime as madar_admission::Config>::AdmissionCapPerRound::get(),
+        admission_cap_per_round: madar_admission::AdmissionCapPerRound::<Runtime>::get(),
         min_fresh_entropy_blocks: <Runtime as madar_admission::Config>::MinFreshEntropyBlocks::get(
         ),
         epoch_duration_slots: <Runtime as pallet_babe::Config>::EpochDuration::get(),

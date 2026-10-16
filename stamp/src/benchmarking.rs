@@ -106,6 +106,34 @@ fn entries(n: u32, evm: bool) -> Vec<Entry> {
         .collect()
 }
 
+/// v2 entries signed for this chain, valid for the longest allowed window.
+fn entries_v2<T: Config>(n: u32, evm: bool) -> Vec<EntryV2> {
+    use frame_support::{sp_runtime::traits::Zero, traits::UnixTime};
+    use frame_system::pallet_prelude::BlockNumberFor;
+    let network = frame_system::Pallet::<T>::block_hash(BlockNumberFor::<T>::zero());
+    let valid_until = T::Time::now().as_millis() as u64 + MAX_STAMP_PROOF_MS;
+    let ekey = evm.then(evm_key);
+    let skey = (!evm).then(solana_key);
+    (0..n)
+        .map(|i| {
+            let fp = fingerprint(i);
+            let name_hash = Some(sp_io::hashing::blake2_256(&(b"bench-name", i).encode()));
+            let msg = signed_message_v2(&fp, &name_hash, network.as_ref(), valid_until);
+            let proof = match (&ekey, &skey) {
+                (Some(k), _) => evm_proof(k, &msg),
+                (_, Some(k)) => solana_proof(k, &msg),
+                _ => unreachable!(),
+            };
+            EntryV2 {
+                fingerprint: fp,
+                name_hash,
+                proof: Some(proof),
+                valid_until,
+            }
+        })
+        .collect()
+}
+
 #[benchmarks]
 mod benchmarks {
     use super::*;
@@ -116,6 +144,7 @@ mod benchmarks {
         let who: T::AccountId = whitelisted_caller();
         full_stampers::<T>(&who);
         let batch: BoundedVec<Entry, T::MaxBatch> = BoundedVec::truncate_from(entries(n, true));
+        LegacyAcceptedUntil::<T>::put(u64::MAX);
 
         #[extrinsic_call]
         stamp(RawOrigin::Signed(who), batch);
@@ -130,11 +159,55 @@ mod benchmarks {
         let who: T::AccountId = whitelisted_caller();
         full_stampers::<T>(&who);
         let batch: BoundedVec<Entry, T::MaxBatch> = BoundedVec::truncate_from(entries(n, false));
+        LegacyAcceptedUntil::<T>::put(u64::MAX);
 
         #[extrinsic_call]
         stamp(RawOrigin::Signed(who), batch);
 
         assert!(Stamps::<T>::contains_key(fingerprint(n - 1)));
+        Ok(())
+    }
+
+    /// spec 9: batch of `n` new fingerprints with v2 messages, each with an EVM wallet proof.
+    #[benchmark]
+    fn stamp_v2(n: Linear<1, { T::MaxBatch::get() }>) -> Result<(), BenchmarkError> {
+        let who: T::AccountId = whitelisted_caller();
+        full_stampers::<T>(&who);
+        let batch: BoundedVec<EntryV2, T::MaxBatch> =
+            BoundedVec::truncate_from(entries_v2::<T>(n, true));
+
+        #[extrinsic_call]
+        stamp_v2(RawOrigin::Signed(who), batch);
+
+        assert!(Stamps::<T>::contains_key(fingerprint(n - 1)));
+        Ok(())
+    }
+
+    /// Same with Solana proofs.
+    #[benchmark]
+    fn stamp_v2_solana(n: Linear<1, { T::MaxBatch::get() }>) -> Result<(), BenchmarkError> {
+        let who: T::AccountId = whitelisted_caller();
+        full_stampers::<T>(&who);
+        let batch: BoundedVec<EntryV2, T::MaxBatch> =
+            BoundedVec::truncate_from(entries_v2::<T>(n, false));
+
+        #[extrinsic_call]
+        stamp_v2(RawOrigin::Signed(who), batch);
+
+        assert!(Stamps::<T>::contains_key(fingerprint(n - 1)));
+        Ok(())
+    }
+
+    #[benchmark]
+    fn set_legacy_accepted_until() -> Result<(), BenchmarkError> {
+        LegacyAcceptedUntil::<T>::put(1_000);
+        let origin =
+            T::AdminOrigin::try_successful_origin().map_err(|_| BenchmarkError::Weightless)?;
+
+        #[extrinsic_call]
+        _(origin as T::RuntimeOrigin, 0);
+
+        assert_eq!(LegacyAcceptedUntil::<T>::get(), 0);
         Ok(())
     }
 

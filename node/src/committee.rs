@@ -6,18 +6,23 @@
 //!    its two transactions and adds them to the request file. First member: propose + vote. Second: vote + close (execute). Neither the key nor the passphrase is written to disk.
 //! 3. `submit` (online): sends the four transactions in order, waits for each to be included, then verifies the decision's effect on chain.
 //!
-//! Supported decisions: `approve-operator` (approve an operator with a vote cap), `names-reserve` (reserve a name in Madar Names or release it,
+//! Supported decisions: `approve-operator` (approve an operator with a vote cap), `admission-params` (spec 9: the cap on admissions per rotation or
+//! the cap on votes per operator, within two hard limits in the Runtime), `names-reserve` (reserve a name in "Madar Names" or release it,
 //! `Names::set_reserved`), `recover-finality` (recover stalled finality: `Grandpa::note_stalled`) and `upgrade-runtime` (network upgrade): the committee approves only the **hash** of the WASM file
 //! (`System::authorize_upgrade` via `UpgradeAuthority::dispatch_as_root`), so the signature stays small with no large file; then `submit` sends the file itself
 //! (`apply_authorized_upgrade`, unsigned) and the chain accepts it only if its hash matches and its version is newer. Transactions are Mortal (window ~256 blocks ≈ 40 minutes): signing
 //! and submitting must both happen within it, otherwise `prepare` must be rerun.
+//!
+//! **Versions (spec 9):** the tool built from spec 9 (tx 2) also serves a spec ≤ 8 chain (tx 1) — the committee signs the spec 9 upgrade itself while the chain
+//! is still on 8 — but only with calls whose encoding did not change (`join::tx::encodes_the_same_on_spec8`); an `admission-params` decision
+//! is explicitly refused there.
 
 use crate::join::account::{self, Account};
 use crate::join::rpc::{HttpRpc, Transport};
-use crate::join::tx::{self, TxParams};
+use crate::join::tx::{self, encodes_the_same_on_spec8, is_legacy, tx_version_supported, TxParams};
 use madar_consensus::{
-    madar_admission, madar_names, AccountId, Runtime, RuntimeCall, UpgradeCommitteeInstance,
-    VERSION,
+    madar_admission, madar_names, madar_stamp, AccountId, Runtime, RuntimeCall,
+    UpgradeCommitteeInstance, VERSION,
 };
 use parity_scale_codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
@@ -57,6 +62,11 @@ pub enum CommitteeCmd {
     PrepareNamesReserve(PrepareNamesReserveArgs),
     /// (online) Prepare a request to recover stalled finality: at the start of the next session the current voter set is forced on GRANDPA.
     PrepareRecoverFinality(PrepareRecoverFinalityArgs),
+    /// (online, spec 9) Prepare a request to change an admission parameter: `--cap` (the cap on admissions per rotation) or `--max-votes` (the cap on votes per operator).
+    PrepareAdmissionParams(PrepareAdmissionParamsArgs),
+    /// (online, spec 9) Prepare a request for the deadline of old v1 messages in "Madar Names" or "Madar Stamp": `--stop-now` (stop immediately) or
+    /// `--until-ms` (shorten, or extend by up to 7 days past the current deadline).
+    PrepareLegacySunset(PrepareLegacySunsetArgs),
     /// (offline) A committee member signs the request. Refuses to run while the machine is online.
     Sign(SignArgs),
     /// (online) Submit a request signed by two members to the network in order, and verify the result.
@@ -116,6 +126,45 @@ pub struct PrepareRecoverFinalityArgs {
     /// Number of blocks after the next session starts before the forced set takes effect.
     #[arg(long, default_value_t = RECOVER_DELAY)]
     pub delay: u32,
+    #[arg(long)]
+    pub out: PathBuf,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct PrepareAdmissionParamsArgs {
+    #[arg(long, default_value = "127.0.0.1:9944")]
+    pub rpc: String,
+    /// The cap on new admissions per rotation (0 = new admissions paused). The hard limit in the Runtime: 16.
+    #[arg(
+        long,
+        conflicts_with = "max_votes",
+        required_unless_present = "max_votes"
+    )]
+    pub cap: Option<u32>,
+    /// The cap on votes per operator (1 up to the hard limit 4).
+    #[arg(long)]
+    pub max_votes: Option<u32>,
+    #[arg(long)]
+    pub out: PathBuf,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct PrepareLegacySunsetArgs {
+    #[arg(long, default_value = "127.0.0.1:9944")]
+    pub rpc: String,
+    /// names or stamp.
+    #[arg(long, value_enum)]
+    pub target: LegacyTarget,
+    /// Stop v1 messages immediately (deadline = 0).
+    #[arg(
+        long,
+        conflicts_with = "until_ms",
+        required_unless_present = "until_ms"
+    )]
+    pub stop_now: bool,
+    /// The end of the new deadline (UTC milliseconds). Extension only up to 7 days past the current deadline; shortening without limit.
+    #[arg(long)]
+    pub until_ms: Option<u64>,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -186,6 +235,12 @@ pub struct Request {
     /// For `recover-finality` requests only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recover: Option<RecoverInfo>,
+    /// For `admission-params` requests only (spec 9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_param: Option<AdmissionParamInfo>,
+    /// For `legacy-sunset` requests only (spec 9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_sunset: Option<LegacySunsetInfo>,
     /// The call the committee will execute (SCALE-encoded).
     pub call_hex: String,
     pub proposal_hash: H256,
@@ -219,6 +274,41 @@ pub struct RecoverInfo {
     pub dead: Vec<String>,
     pub set_id: u64,
 }
+
+/// spec 9 — the admission parameter to change and its new value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionParamInfo {
+    pub param: AdmissionParam,
+    pub value: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdmissionParam {
+    /// `Admission::set_admission_cap_per_round` (D54).
+    CapPerRound,
+    /// `Admission::set_max_votes_per_operator` (D52).
+    MaxVotesPerOperator,
+}
+
+/// spec 9 — the deadline of old v1 messages: which module, and the new end (UTC milliseconds; 0 = stop immediately).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacySunsetInfo {
+    pub target: LegacyTarget,
+    pub until: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum LegacyTarget {
+    /// `Names::set_legacy_accepted_until`.
+    Names,
+    /// `Stamp::set_legacy_accepted_until`.
+    Stamp,
+}
+
+/// The first spec with the two calls that set the Admission parameters.
+pub const MIN_SPEC_ADMISSION_PARAMS: u32 = 9;
 
 /// Reserve or release a name: the name without `.madar`, and the requested state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,6 +344,8 @@ pub fn run(cmd: CommitteeCmd) -> Result<(), String> {
         CommitteeCmd::PrepareUpgrade(a) => prepare_upgrade(a),
         CommitteeCmd::PrepareNamesReserve(a) => prepare_names_reserve(a),
         CommitteeCmd::PrepareRecoverFinality(a) => prepare_recover_finality(a),
+        CommitteeCmd::PrepareAdmissionParams(a) => prepare_admission_params(a),
+        CommitteeCmd::PrepareLegacySunset(a) => prepare_legacy_sunset(a),
         CommitteeCmd::Sign(a) => sign(a),
         CommitteeCmd::Submit(a) => submit(a),
         CommitteeCmd::Show(a) => show(a),
@@ -305,6 +397,92 @@ pub fn recover_finality_summary(delay: u32, best_finalized: u32) -> String {
     )
 }
 
+fn admission_param_call(i: &AdmissionParamInfo) -> RuntimeCall {
+    RuntimeCall::Admission(match i.param {
+        AdmissionParam::CapPerRound => {
+            madar_admission::Call::set_admission_cap_per_round { cap: i.value }
+        }
+        AdmissionParam::MaxVotesPerOperator => {
+            madar_admission::Call::set_max_votes_per_operator { votes: i.value }
+        }
+    })
+}
+
+/// The text a member sees for an admission parameter decision (spec 9).
+pub fn admission_param_summary(i: &AdmissionParamInfo) -> String {
+    match (i.param, i.value) {
+        (AdmissionParam::CapPerRound, 0) => {
+            "Pause admission of new nodes: the cap on admissions per rotation = 0 (current members and renewals are not affected)".to_string()
+        },
+        (AdmissionParam::CapPerRound, v) => format!("The cap on new admissions per rotation (2 hours) = {v}"),
+        (AdmissionParam::MaxVotesPerOperator, v) => format!("The cap on votes per operator = {v} (nobody is evicted when lowering it)"),
+    }
+}
+
+fn legacy_sunset_call(i: &LegacySunsetInfo) -> RuntimeCall {
+    match i.target {
+        LegacyTarget::Names => {
+            RuntimeCall::Names(madar_names::Call::set_legacy_accepted_until { until: i.until })
+        }
+        LegacyTarget::Stamp => {
+            RuntimeCall::Stamp(madar_stamp::Call::set_legacy_accepted_until { until: i.until })
+        }
+    }
+}
+
+/// A readable UTC date from milliseconds (without a date library): `YYYY-MM-DD HH:MM UTC`.
+fn utc_text(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
+    // civil-from-days (Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        rem / 3600,
+        (rem % 3600) / 60
+    )
+}
+
+/// The text a member sees for a v1 message deadline decision (spec 9).
+pub fn legacy_sunset_summary(i: &LegacySunsetInfo) -> String {
+    let what = match i.target {
+        LegacyTarget::Names => "Madar Names",
+        LegacyTarget::Stamp => "Madar Stamp",
+    };
+    if i.until == 0 {
+        format!("Stop the old (v1) signing messages in {what} immediately")
+    } else {
+        format!(
+            "Accept the old (v1) signing messages in {what} until {} ({} milliseconds)",
+            utc_text(i.until),
+            i.until
+        )
+    }
+}
+
+/// The hard limit in the Runtime this executable was built from, and the minimum.
+fn admission_param_range(p: AdmissionParam) -> (u32, u32) {
+    use frame_support::traits::Get;
+    match p {
+        AdmissionParam::CapPerRound => (
+            0,
+            <<Runtime as madar_admission::Config>::AdmissionCapPerRoundLimit as Get<u32>>::get(),
+        ),
+        AdmissionParam::MaxVotesPerOperator => (
+            1,
+            <<Runtime as madar_admission::Config>::MaxVotesPerOperatorLimit as Get<u32>>::get(),
+        ),
+    }
+}
+
 /// What the decision will actually execute, read from the encoded call itself (not from the description text in the file). `None` = a call
 /// the tool does not know, so it is never signed.
 pub fn call_summary(call: &RuntimeCall) -> Option<String> {
@@ -319,6 +497,30 @@ pub fn call_summary(call: &RuntimeCall) -> Option<String> {
             "Approve operator {} with a cap of {max_votes} vote(s)",
             operator.to_ss58check()
         )),
+        RuntimeCall::Admission(madar_admission::Call::set_admission_cap_per_round { cap }) => {
+            Some(admission_param_summary(&AdmissionParamInfo {
+                param: AdmissionParam::CapPerRound,
+                value: *cap,
+            }))
+        }
+        RuntimeCall::Admission(madar_admission::Call::set_max_votes_per_operator { votes }) => {
+            Some(admission_param_summary(&AdmissionParamInfo {
+                param: AdmissionParam::MaxVotesPerOperator,
+                value: *votes,
+            }))
+        }
+        RuntimeCall::Names(madar_names::Call::set_legacy_accepted_until { until }) => {
+            Some(legacy_sunset_summary(&LegacySunsetInfo {
+                target: LegacyTarget::Names,
+                until: *until,
+            }))
+        }
+        RuntimeCall::Stamp(madar_stamp::Call::set_legacy_accepted_until { until }) => {
+            Some(legacy_sunset_summary(&LegacySunsetInfo {
+                target: LegacyTarget::Stamp,
+                until: *until,
+            }))
+        }
         RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root { call }) => {
             match &**call {
                 RuntimeCall::System(frame_system::Call::authorize_upgrade { code_hash }) => Some(
@@ -447,6 +649,36 @@ fn finalized_block(t: &dyn Transport) -> Result<u64, String> {
     header_number(&t.call("chain_getHeader", json!([hash]))?)
 }
 
+/// The current on-chain value of an admission parameter (the default if not written yet).
+fn admission_param_value(t: &dyn Transport, p: AdmissionParam) -> Result<u32, String> {
+    use frame_support::traits::Get;
+    Ok(match p {
+        AdmissionParam::CapPerRound => storage(
+            t,
+            madar_admission::AdmissionCapPerRound::<Runtime>::hashed_key().to_vec(),
+        )?
+        .unwrap_or(
+            <<Runtime as madar_admission::Config>::DefaultAdmissionCapPerRound as Get<u32>>::get(),
+        ),
+        AdmissionParam::MaxVotesPerOperator => storage(
+            t,
+            madar_admission::MaxVotesPerOperator::<Runtime>::hashed_key().to_vec(),
+        )?
+        .unwrap_or(
+            <<Runtime as madar_admission::Config>::DefaultMaxVotesPerOperator as Get<u32>>::get(),
+        ),
+    })
+}
+
+/// spec 9 — the current deadline of v1 messages in the module (0 if not set).
+fn legacy_sunset_value(t: &dyn Transport, target: LegacyTarget) -> Result<u64, String> {
+    let key = match target {
+        LegacyTarget::Names => madar_names::LegacyAcceptedUntil::<Runtime>::hashed_key().to_vec(),
+        LegacyTarget::Stamp => madar_stamp::LegacyAcceptedUntil::<Runtime>::hashed_key().to_vec(),
+    };
+    Ok(storage(t, key)?.unwrap_or(0))
+}
+
 /// `Grandpa::Stalled` present = the recovery decision reached the chain and is waiting for the next session to start.
 fn grandpa_stalled(t: &dyn Transport) -> Result<Option<(u32, u32)>, String> {
     storage(t, pallet_grandpa::Stalled::<Runtime>::hashed_key().to_vec())
@@ -491,9 +723,18 @@ fn chain_version(t: &dyn Transport) -> Result<(u32, u32), String> {
     Ok((spec, txv))
 }
 
-/// The tool serves the current network version or older ones (before an upgrade the tool is built from the new code), provided the transaction format is the same.
+/// The tool serves the current network version or an older one (before an upgrade the tool is built from the new code), provided the transaction format is one it knows: its own
+/// (tx 2) or a spec ≤ 8 chain (tx 1) on which the spec 9 upgrade itself is signed (only with calls whose encoding did not change, checked at prepare and sign).
 fn compatible(spec: u32, txv: u32) -> bool {
-    spec <= VERSION.spec_version && txv == VERSION.transaction_version
+    spec <= VERSION.spec_version && tx_version_supported(spec, txv)
+}
+
+/// On a spec ≤ 8 chain only a decision whose encoding did not change is prepared or signed.
+fn ensure_call_fits_chain(spec: u32, txv: u32, call: &RuntimeCall) -> Result<(), String> {
+    if is_legacy(spec, txv) && !encodes_the_same_on_spec8(&propose(call)) {
+        return Err(format!("The network is on version {spec}, and this decision needs version {MIN_SPEC_ADMISSION_PARAMS} — wait for the upgrade."));
+    }
+    Ok(())
 }
 
 /// Returns the chain version if the tool is compatible with it.
@@ -562,11 +803,13 @@ pub fn prepare_request(
         upgrade: None,
         names_reserve: None,
         recover: None,
+        admission_param: None,
+        legacy_sunset: None,
         call_hex: format!("0x{}", hex::encode(call.encode())),
         proposal_hash: BlakeTwo256::hash_of(&call),
         proposal_index: proposal_count(t)?,
         spec_version: spec,
-        transaction_version: VERSION.transaction_version,
+        transaction_version: params.transaction_version,
         expires_at_block: params.expires_at(),
         params,
         members: with_nonces,
@@ -624,11 +867,13 @@ pub fn prepare_upgrade_request(
         }),
         names_reserve: None,
         recover: None,
+        admission_param: None,
+        legacy_sunset: None,
         call_hex: format!("0x{}", hex::encode(call.encode())),
         proposal_hash: BlakeTwo256::hash_of(&call),
         proposal_index: proposal_count(t)?,
         spec_version: spec,
-        transaction_version: VERSION.transaction_version,
+        transaction_version: params.transaction_version,
         expires_at_block: params.expires_at(),
         params,
         members: with_nonces,
@@ -675,11 +920,13 @@ pub fn prepare_names_reserve_request(
             reserved,
         }),
         recover: None,
+        admission_param: None,
+        legacy_sunset: None,
         call_hex: format!("0x{}", hex::encode(call.encode())),
         proposal_hash: BlakeTwo256::hash_of(&call),
         proposal_index: proposal_count(t)?,
         spec_version: spec,
-        transaction_version: VERSION.transaction_version,
+        transaction_version: params.transaction_version,
         expires_at_block: params.expires_at(),
         params,
         members: with_nonces,
@@ -744,17 +991,185 @@ pub fn prepare_recover_finality_request(
             dead: dead.iter().map(|d| d.to_ss58check()).collect(),
             set_id: grandpa_set_id(t)?,
         }),
+        admission_param: None,
+        legacy_sunset: None,
         call_hex: format!("0x{}", hex::encode(call.encode())),
         proposal_hash: BlakeTwo256::hash_of(&call),
         proposal_index: proposal_count(t)?,
         spec_version: spec,
-        transaction_version: VERSION.transaction_version,
+        transaction_version: params.transaction_version,
         expires_at_block: params.expires_at(),
         params,
         members: with_nonces,
         signed: vec![],
         done: false,
     })
+}
+
+/// spec 9 — request to change an admission parameter: refused on a chain older than 9, outside the two hard limits, and if the value is the current one.
+pub fn prepare_admission_params_request(
+    t: &dyn Transport,
+    info: AdmissionParamInfo,
+) -> Result<Request, String> {
+    let spec = check_runtime(t)?;
+    if spec < MIN_SPEC_ADMISSION_PARAMS {
+        return Err(format!(
+            "The network is on version {spec}; changing the admission parameters needs version {MIN_SPEC_ADMISSION_PARAMS} — only after the upgrade."
+        ));
+    }
+    let (min, max) = admission_param_range(info.param);
+    if !(min..=max).contains(&info.value) {
+        return Err(format!(
+            "The value {} is outside the allowed range ({min} to {max}) — the network will refuse it.",
+            info.value
+        ));
+    }
+    let now = admission_param_value(t, info.param)?;
+    if now == info.value {
+        return Err(format!(
+            "The value on chain is already {now} — no request needed."
+        ));
+    }
+    let members = members(t)?;
+    if members.len() < THRESHOLD as usize {
+        return Err("The on-chain upgrade committee has fewer than two members — a 2-of-3 decision cannot pass.".into());
+    }
+    let mut with_nonces = Vec::new();
+    for m in &members {
+        with_nonces.push((m.to_ss58check(), tx::next_nonce(t, m)?));
+    }
+    let call = admission_param_call(&info);
+    let params = tx::fetch_params(t, ERA_PERIOD)?;
+    ensure_call_fits_chain(params.spec_version, params.transaction_version, &call)?;
+    Ok(Request {
+        version: 1,
+        action: "admission-params".into(),
+        description: admission_param_summary(&info),
+        operator: String::new(),
+        max_votes: 0,
+        upgrade: None,
+        names_reserve: None,
+        recover: None,
+        admission_param: Some(info),
+        legacy_sunset: None,
+        call_hex: format!("0x{}", hex::encode(call.encode())),
+        proposal_hash: BlakeTwo256::hash_of(&call),
+        proposal_index: proposal_count(t)?,
+        spec_version: spec,
+        transaction_version: params.transaction_version,
+        expires_at_block: params.expires_at(),
+        params,
+        members: with_nonces,
+        signed: vec![],
+        done: false,
+    })
+}
+
+/// spec 9 — request for a v1 message deadline: refused on a chain older than 9, for an extension of more than 7 days past the current deadline, and for the current value itself.
+pub fn prepare_legacy_sunset_request(
+    t: &dyn Transport,
+    info: LegacySunsetInfo,
+) -> Result<Request, String> {
+    let spec = check_runtime(t)?;
+    if spec < MIN_SPEC_ADMISSION_PARAMS {
+        return Err(format!("The network is on version {spec}; the v1 message deadline needs version {MIN_SPEC_ADMISSION_PARAMS} — only after the upgrade."));
+    }
+    let now = legacy_sunset_value(t, info.target)?;
+    if now == info.until {
+        return Err(format!(
+            "The deadline on chain is already {now} — no request needed."
+        ));
+    }
+    if !madar_stamp::legacy_change_allowed(now, info.until) {
+        return Err(format!(
+            "An extension of more than 7 days past the current deadline ({}) — the network will refuse it. The maximum now: {}.",
+            utc_text(now),
+            utc_text(now.saturating_add(madar_stamp::MAX_LEGACY_EXTENSION_MS))
+        ));
+    }
+    let members = members(t)?;
+    if members.len() < THRESHOLD as usize {
+        return Err("The on-chain upgrade committee has fewer than two members — a 2-of-3 decision cannot pass.".into());
+    }
+    let mut with_nonces = Vec::new();
+    for m in &members {
+        with_nonces.push((m.to_ss58check(), tx::next_nonce(t, m)?));
+    }
+    let call = legacy_sunset_call(&info);
+    let params = tx::fetch_params(t, ERA_PERIOD)?;
+    ensure_call_fits_chain(params.spec_version, params.transaction_version, &call)?;
+    Ok(Request {
+        version: 1,
+        action: "legacy-sunset".into(),
+        description: legacy_sunset_summary(&info),
+        operator: String::new(),
+        max_votes: 0,
+        upgrade: None,
+        names_reserve: None,
+        recover: None,
+        admission_param: None,
+        legacy_sunset: Some(info),
+        call_hex: format!("0x{}", hex::encode(call.encode())),
+        proposal_hash: BlakeTwo256::hash_of(&call),
+        proposal_index: proposal_count(t)?,
+        spec_version: spec,
+        transaction_version: params.transaction_version,
+        expires_at_block: params.expires_at(),
+        params,
+        members: with_nonces,
+        signed: vec![],
+        done: false,
+    })
+}
+
+fn prepare_legacy_sunset(a: PrepareLegacySunsetArgs) -> Result<(), String> {
+    let t = HttpRpc::new(&a.rpc);
+    let until = match (a.stop_now, a.until_ms) {
+        (true, None) => 0,
+        (false, Some(u)) => u,
+        _ => return Err("Give exactly one: --stop-now or --until-ms.".into()),
+    };
+    let r = prepare_legacy_sunset_request(
+        &t,
+        LegacySunsetInfo {
+            target: a.target,
+            until,
+        },
+    )?;
+    write_request(&a.out, &r)?;
+    println!("Request prepared: {}", r.description);
+    println!("  File: {}", a.out.display());
+    println!(
+        "  Valid until block #{} (sign and submit before then).",
+        r.expires_at_block
+    );
+    println!("Next step: disconnect from the internet, then: madar-node committee sign --request {} --key-file <member-key.enc>", a.out.display());
+    Ok(())
+}
+
+fn prepare_admission_params(a: PrepareAdmissionParamsArgs) -> Result<(), String> {
+    let t = HttpRpc::new(&a.rpc);
+    let info = match (a.cap, a.max_votes) {
+        (Some(v), None) => AdmissionParamInfo {
+            param: AdmissionParam::CapPerRound,
+            value: v,
+        },
+        (None, Some(v)) => AdmissionParamInfo {
+            param: AdmissionParam::MaxVotesPerOperator,
+            value: v,
+        },
+        _ => return Err("Give exactly one: --cap or --max-votes.".into()),
+    };
+    let r = prepare_admission_params_request(&t, info)?;
+    write_request(&a.out, &r)?;
+    println!("Request prepared: {}", r.description);
+    println!("  File: {}", a.out.display());
+    println!(
+        "  Valid until block #{} (sign and submit before then).",
+        r.expires_at_block
+    );
+    println!("Next step: disconnect from the internet, then: madar-node committee sign --request {} --key-file <member-key.enc>", a.out.display());
+    Ok(())
 }
 
 fn prepare_recover_finality(a: PrepareRecoverFinalityArgs) -> Result<(), String> {
@@ -879,12 +1294,47 @@ pub fn sign_request(r: &mut Request, acct: &Account) -> Result<String, String> {
         if r.action != "names-reserve" || summary != expected || r.description != expected {
             return Err("Request file is corrupted (the name-reserve description does not match its contents) — will not sign.".into());
         }
-    } else if r.action == "names-reserve" || matches!(call, RuntimeCall::Names(_)) {
+    } else if r.action == "names-reserve"
+        || matches!(call, RuntimeCall::Names(ref c) if !matches!(c, madar_names::Call::set_legacy_accepted_until { .. }))
+    {
         return Err(
             "Request file is corrupted (a names decision without its details) — will not sign."
                 .into(),
         );
     }
+    let is_admission_param = matches!(
+        &call,
+        RuntimeCall::Admission(
+            madar_admission::Call::set_admission_cap_per_round { .. }
+                | madar_admission::Call::set_max_votes_per_operator { .. }
+        )
+    );
+    match &r.admission_param {
+        // The description the member sees must match what will actually be executed (spec 9).
+        Some(i)
+            if r.action == "admission-params"
+                && is_admission_param
+                && admission_param_call(i) == call
+                && r.description == summary => {}
+        None if r.action != "admission-params" && !is_admission_param => {}
+        _ => return Err("Request file is corrupted (the admission parameter description does not match its contents) — will not sign.".into()),
+    }
+    let is_legacy_sunset = matches!(
+        &call,
+        RuntimeCall::Names(madar_names::Call::set_legacy_accepted_until { .. })
+            | RuntimeCall::Stamp(madar_stamp::Call::set_legacy_accepted_until { .. })
+    );
+    match &r.legacy_sunset {
+        // spec 9: the module and the deadline in the description must match the call itself.
+        Some(i)
+            if r.action == "legacy-sunset"
+                && is_legacy_sunset
+                && legacy_sunset_call(i) == call
+                && r.description == summary => {}
+        None if r.action != "legacy-sunset" && !is_legacy_sunset => {}
+        _ => return Err("Request file is corrupted (the v1 message deadline description does not match its contents) — will not sign.".into()),
+    }
+    ensure_call_fits_chain(r.params.spec_version, r.params.transaction_version, &call)?;
     let is_recover = matches!(&call, RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root { call })
         if matches!(&**call, RuntimeCall::Grandpa(_)));
     if (r.action == "recover-finality") != is_recover || (is_recover && r.description != summary) {
@@ -1102,6 +1552,27 @@ pub fn submit_request(
             None => done,
         });
     }
+    if let Some(i) = r.legacy_sunset {
+        let now = legacy_sunset_value(t, i.target)?;
+        if now != i.until {
+            return Err(format!("The four transactions were sent but the deadline on chain is {now}, not {} — check the chain events.", i.until));
+        }
+        r.done = true;
+        save(r);
+        return Ok(format!("✅ Committee decision executed: {}", r.description));
+    }
+    if let Some(i) = r.admission_param {
+        let now = admission_param_value(t, i.param)?;
+        if now != i.value {
+            return Err(format!(
+                "The four transactions were sent but the value on chain is {now}, not {} — check the chain events.",
+                i.value
+            ));
+        }
+        r.done = true;
+        save(r);
+        return Ok(format!("✅ Committee decision executed: {}", r.description));
+    }
     if r.action == "recover-finality" {
         let before = r.recover.as_ref().map(|i| i.set_id).unwrap_or(u64::MAX);
         if grandpa_stalled(t)?.is_none() && grandpa_set_id(t)? <= before {
@@ -1267,6 +1738,8 @@ mod tests {
             upgrade: None,
             names_reserve: None,
             recover: None,
+            admission_param: None,
+            legacy_sunset: None,
             call_hex: format!("0x{}", hex::encode(call.encode())),
             proposal_hash: BlakeTwo256::hash_of(&call),
             proposal_index: 7,
@@ -1396,6 +1869,493 @@ mod tests {
             VERSION.spec_version,
             VERSION.transaction_version + 1
         ));
+    }
+
+    /// spec 9 bumped the transaction version (1 → 2). The committee signs the spec 9 upgrade while the chain is still
+    /// spec 8 / tx 1, so that pair must stay served; a spec 9 chain with tx 1 must not.
+    #[test]
+    fn the_spec9_tool_still_serves_the_spec8_tx1_chain_that_signs_the_upgrade() {
+        assert_eq!(VERSION.transaction_version, 2);
+        assert!(
+            compatible(8, 1),
+            "the live chain at the time of the upgrade"
+        );
+        assert!(compatible(7, 1));
+        assert!(!compatible(9, 1), "a spec 9 chain is tx 2");
+        assert!(!compatible(8, 3));
+    }
+
+    /// A request prepared on the spec 8 / tx 1 chain is signed with **tx 1** (and spec 8): the payload verifies with the
+    /// chain's versions and not with the tool's. Exactly what `prepare-upgrade` + `sign` produce before the upgrade.
+    #[test]
+    fn a_request_prepared_on_the_spec8_chain_is_signed_with_tx_version_1() {
+        use sp_runtime::traits::Verify;
+        let (a, b) = (acct(1), acct(2));
+        let mut r = request(&[&a, &b]);
+        let call = authorize_upgrade_call(H256::repeat_byte(4));
+        r.action = "upgrade-runtime".into();
+        r.operator = String::new();
+        r.call_hex = format!("0x{}", hex::encode(call.encode()));
+        r.proposal_hash = BlakeTwo256::hash_of(&call);
+        r.spec_version = 8;
+        r.transaction_version = 1;
+        r.params.spec_version = 8;
+        r.params.transaction_version = 1;
+        sign_request(&mut r, &a).unwrap();
+        let bytes = hex::decode(r.signed[0].hex.trim_start_matches("0x")).unwrap();
+        let xt = madar_consensus::UncheckedExtrinsic::decode(&mut &bytes[..]).unwrap();
+        let (sig, extra) = match &xt.preamble {
+            sp_runtime::generic::Preamble::Signed(_, s, e) => (s.clone(), e.clone()),
+            _ => panic!("signed"),
+        };
+        let payload = |spec: u32, txv: u32| {
+            sp_runtime::generic::SignedPayload::from_raw(
+                xt.function.clone(),
+                extra.clone(),
+                (spec, txv, r.params.genesis, r.params.birth_hash, (), ()),
+            )
+            .encode()
+        };
+        assert!(
+            sig.verify(&payload(8, 1)[..], &a.id()),
+            "signed for the spec 8 / tx 1 chain"
+        );
+        assert!(!sig.verify(&payload(8, 2)[..], &a.id()));
+        assert!(!sig.verify(
+            &payload(VERSION.spec_version, VERSION.transaction_version)[..],
+            &a.id()
+        ));
+        // the proposal bytes are the spec 8 encoding: UpgradeAuthority (10) dispatch_as_root (0) System (0) authorize_upgrade (9)
+        assert_eq!(&call.encode()[..4], &[10, 0, 0, 9]);
+    }
+
+    fn params_request(members: &[&Account], info: AdmissionParamInfo) -> Request {
+        let mut r = request(members);
+        let call = admission_param_call(&info);
+        r.action = "admission-params".into();
+        r.description = admission_param_summary(&info);
+        r.operator = String::new();
+        r.max_votes = 0;
+        r.admission_param = Some(info);
+        r.call_hex = format!("0x{}", hex::encode(call.encode()));
+        r.proposal_hash = BlakeTwo256::hash_of(&call);
+        r
+    }
+
+    /// spec 9: the setters are encoded as the runtime expects (Admission = 8, call 8 / 9, u32 LE) and members see a
+    /// summary read from the call itself.
+    #[test]
+    fn the_admission_params_calls_and_their_summaries() {
+        let cap = AdmissionParamInfo {
+            param: AdmissionParam::CapPerRound,
+            value: 3,
+        };
+        let votes = AdmissionParamInfo {
+            param: AdmissionParam::MaxVotesPerOperator,
+            value: 2,
+        };
+        assert_eq!(admission_param_call(&cap).encode(), vec![8, 8, 3, 0, 0, 0]);
+        assert_eq!(
+            admission_param_call(&votes).encode(),
+            vec![8, 9, 2, 0, 0, 0]
+        );
+        assert_eq!(
+            call_summary(&admission_param_call(&cap)).unwrap(),
+            "The cap on new admissions per rotation (2 hours) = 3"
+        );
+        assert_eq!(
+            call_summary(&admission_param_call(&votes)).unwrap(),
+            "The cap on votes per operator = 2 (nobody is evicted when lowering it)"
+        );
+        let pause = AdmissionParamInfo {
+            param: AdmissionParam::CapPerRound,
+            value: 0,
+        };
+        assert!(admission_param_summary(&pause).contains("Pause admission of new nodes"));
+        assert_eq!(admission_param_range(AdmissionParam::CapPerRound), (0, 16));
+        assert_eq!(
+            admission_param_range(AdmissionParam::MaxVotesPerOperator),
+            (1, 4)
+        );
+    }
+
+    #[test]
+    fn members_sign_exactly_the_admission_params_decision_and_a_mismatch_is_refused() {
+        let (a, b, c) = (acct(1), acct(2), acct(3));
+        let info = AdmissionParamInfo {
+            param: AdmissionParam::CapPerRound,
+            value: 3,
+        };
+        let mut r = params_request(&[&a, &b, &c], info);
+        assert!(sign_request(&mut r, &a)
+            .unwrap()
+            .contains("The cap on new admissions per rotation (2 hours) = 3"));
+        assert!(sign_request(&mut r, &b).unwrap().contains("2 of 2"));
+        assert!(r.complete());
+        // text says 3, call says 16
+        let mut lie = params_request(
+            &[&a, &b],
+            AdmissionParamInfo {
+                param: AdmissionParam::CapPerRound,
+                value: 16,
+            },
+        );
+        lie.description = admission_param_summary(&info);
+        assert!(sign_request(&mut lie, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        // details say «cap», the call sets the votes cap
+        let mut swapped = params_request(
+            &[&a, &b],
+            AdmissionParamInfo {
+                param: AdmissionParam::MaxVotesPerOperator,
+                value: 3,
+            },
+        );
+        swapped.admission_param = Some(info);
+        swapped.description = admission_param_summary(&info);
+        assert!(sign_request(&mut swapped, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        // a setter hidden in a request labelled as an operator approval
+        let mut hidden = params_request(&[&a, &b], info);
+        hidden.action = "approve-operator".into();
+        hidden.admission_param = None;
+        assert!(sign_request(&mut hidden, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        assert!(lie.signed.is_empty() && swapped.signed.is_empty() && hidden.signed.is_empty());
+    }
+
+    fn sunset_request(members: &[&Account], info: LegacySunsetInfo) -> Request {
+        let mut r = request(members);
+        let call = legacy_sunset_call(&info);
+        r.action = "legacy-sunset".into();
+        r.description = legacy_sunset_summary(&info);
+        r.operator = String::new();
+        r.max_votes = 0;
+        r.legacy_sunset = Some(info);
+        r.call_hex = format!("0x{}", hex::encode(call.encode()));
+        r.proposal_hash = BlakeTwo256::hash_of(&call);
+        r
+    }
+
+    /// spec 9 (independent review #2): the legacy-sunset setters are encoded as the runtime expects (Names = 12 call 16,
+    /// Stamp = 11 call 4, u64 LE) and members read a summary taken from the call itself.
+    #[test]
+    fn the_legacy_sunset_calls_and_their_summaries() {
+        let stop = LegacySunsetInfo {
+            target: LegacyTarget::Names,
+            until: 0,
+        };
+        let until = LegacySunsetInfo {
+            target: LegacyTarget::Stamp,
+            until: 1_790_000_000_000,
+        };
+        assert_eq!(&legacy_sunset_call(&stop).encode()[..2], &[12, 16]);
+        assert_eq!(
+            legacy_sunset_call(&until).encode(),
+            [&[11u8, 4][..], &1_790_000_000_000u64.to_le_bytes()[..]].concat()
+        );
+        assert_eq!(
+            call_summary(&legacy_sunset_call(&stop)).unwrap(),
+            "Stop the old (v1) signing messages in Madar Names immediately"
+        );
+        assert_eq!(
+            call_summary(&legacy_sunset_call(&until)).unwrap(),
+            "Accept the old (v1) signing messages in Madar Stamp until 2026-09-21 14:13 UTC (1790000000000 milliseconds)"
+        );
+        assert_eq!(utc_text(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc_text(951_782_400_000), "2000-02-29 00:00 UTC");
+    }
+
+    #[test]
+    fn members_sign_exactly_the_legacy_sunset_decision_and_a_mismatch_is_refused() {
+        let (a, b) = (acct(1), acct(2));
+        let info = LegacySunsetInfo {
+            target: LegacyTarget::Names,
+            until: 0,
+        };
+        let mut r = sunset_request(&[&a, &b], info);
+        assert!(sign_request(&mut r, &a)
+            .unwrap()
+            .contains("Stop the old (v1) signing messages"));
+        assert!(sign_request(&mut r, &b).is_ok());
+        assert!(r.complete());
+        // text says «stop now», the call extends the window
+        let mut lie = sunset_request(
+            &[&a, &b],
+            LegacySunsetInfo {
+                target: LegacyTarget::Names,
+                until: u64::MAX,
+            },
+        );
+        lie.description = legacy_sunset_summary(&info);
+        assert!(sign_request(&mut lie, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        // details say Names, the call changes Stamp
+        let mut swapped = sunset_request(
+            &[&a, &b],
+            LegacySunsetInfo {
+                target: LegacyTarget::Stamp,
+                until: 0,
+            },
+        );
+        swapped.legacy_sunset = Some(info);
+        swapped.description = legacy_sunset_summary(&info);
+        assert!(sign_request(&mut swapped, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        // the setter hidden in a request labelled as something else
+        let mut hidden = sunset_request(&[&a, &b], info);
+        hidden.action = "approve-operator".into();
+        hidden.legacy_sunset = None;
+        assert!(sign_request(&mut hidden, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        // and never for the spec 8 chain
+        let mut old = sunset_request(&[&a, &b], info);
+        old.spec_version = 8;
+        old.transaction_version = 1;
+        old.params.spec_version = 8;
+        old.params.transaction_version = 1;
+        assert!(sign_request(&mut old, &a).is_err());
+        assert!(
+            lie.signed.is_empty()
+                && swapped.signed.is_empty()
+                && hidden.signed.is_empty()
+                && old.signed.is_empty()
+        );
+    }
+
+    /// A chain mock for `prepare_legacy_sunset_request`.
+    struct SunsetChain {
+        spec: u32,
+        names_until: Option<u64>,
+    }
+    impl Transport for SunsetChain {
+        fn call(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            let key = |k: Vec<u8>| json!([format!("0x{}", hex::encode(k))]);
+            Ok(
+                match method {
+                    "state_getRuntimeVersion" => {
+                        json!({"specVersion": self.spec, "transactionVersion": if self.spec >= 9 { 2 } else { 1 }})
+                    }
+                    "state_getStorage"
+                        if params
+                            == key(
+                                madar_names::LegacyAcceptedUntil::<Runtime>::hashed_key().to_vec()
+                            ) =>
+                    {
+                        self.names_until.map_or(serde_json::Value::Null, |c| {
+                            json!(format!("0x{}", hex::encode(c.encode())))
+                        })
+                    }
+                    "state_getStorage"
+                        if params
+                            == key(pallet_collective::Members::<
+                                Runtime,
+                                UpgradeCommitteeInstance,
+                            >::hashed_key()
+                            .to_vec()) =>
+                    {
+                        json!(format!(
+                            "0x{}",
+                            hex::encode(
+                                vec![
+                                    AccountId::from([1u8; 32]),
+                                    AccountId::from([2u8; 32]),
+                                    AccountId::from([3u8; 32])
+                                ]
+                                .encode()
+                            )
+                        ))
+                    }
+                    "state_getStorage" => serde_json::Value::Null,
+                    "system_accountNextIndex" => json!(5),
+                    "chain_getHeader" => json!({"number": "0x64"}),
+                    "chain_getBlockHash" => json!(format!("{:?}", H256::repeat_byte(3))),
+                    other => return Err(format!("not mocked: {other}")),
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn preparing_a_legacy_sunset_checks_version_the_7_day_bound_and_the_current_value() {
+        let end = 1_790_000_000_000u64 + madar_stamp::LEGACY_SUNSET_MS;
+        let names = |until| LegacySunsetInfo {
+            target: LegacyTarget::Names,
+            until,
+        };
+        assert!(prepare_legacy_sunset_request(
+            &SunsetChain {
+                spec: 8,
+                names_until: None
+            },
+            names(0)
+        )
+        .unwrap_err()
+        .contains("after the upgrade"));
+        let chain = SunsetChain {
+            spec: VERSION.spec_version,
+            names_until: Some(end),
+        };
+        assert!(prepare_legacy_sunset_request(&chain, names(end))
+            .unwrap_err()
+            .contains("already"));
+        assert!(prepare_legacy_sunset_request(
+            &chain,
+            names(end + madar_stamp::MAX_LEGACY_EXTENSION_MS + 1)
+        )
+        .unwrap_err()
+        .contains("7 days"));
+        let r = prepare_legacy_sunset_request(
+            &chain,
+            names(end + madar_stamp::MAX_LEGACY_EXTENSION_MS),
+        )
+        .expect("a 7-day extension");
+        assert_eq!(r.action, "legacy-sunset");
+        assert_eq!(r.description, call_summary(&r.call().unwrap()).unwrap());
+        let r = prepare_legacy_sunset_request(&chain, names(0)).expect("stop now");
+        assert_eq!(r.call().unwrap(), legacy_sunset_call(&names(0)));
+    }
+
+    /// The new setters do not exist on spec 8: a request for them on the spec 8 / tx 1 chain is never signed.
+    #[test]
+    fn admission_params_are_never_signed_for_the_spec8_chain() {
+        let (a, b) = (acct(1), acct(2));
+        let mut r = params_request(
+            &[&a, &b],
+            AdmissionParamInfo {
+                param: AdmissionParam::CapPerRound,
+                value: 3,
+            },
+        );
+        r.spec_version = 8;
+        r.transaction_version = 1;
+        r.params.spec_version = 8;
+        r.params.transaction_version = 1;
+        assert!(sign_request(&mut r, &a).unwrap_err().contains("version 9"));
+        assert!(r.signed.is_empty());
+    }
+
+    /// A chain mock for `prepare_admission_params_request`: version, the stored value, committee, nonces, headers.
+    struct ParamsChain {
+        spec: u32,
+        txv: u32,
+        cap: Option<u32>,
+    }
+    impl Transport for ParamsChain {
+        fn call(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            let key = |k: Vec<u8>| json!([format!("0x{}", hex::encode(k))]);
+            Ok(
+                match method {
+                    "state_getRuntimeVersion" => {
+                        json!({"specVersion": self.spec, "transactionVersion": self.txv})
+                    }
+                    "state_getStorage"
+                        if params
+                            == key(
+                                madar_admission::AdmissionCapPerRound::<Runtime>::hashed_key()
+                                    .to_vec(),
+                            ) =>
+                    {
+                        self.cap.map_or(serde_json::Value::Null, |c| {
+                            json!(format!("0x{}", hex::encode(c.encode())))
+                        })
+                    }
+                    "state_getStorage"
+                        if params
+                            == key(pallet_collective::Members::<
+                                Runtime,
+                                UpgradeCommitteeInstance,
+                            >::hashed_key()
+                            .to_vec()) =>
+                    {
+                        json!(format!(
+                            "0x{}",
+                            hex::encode(
+                                vec![
+                                    AccountId::from([1u8; 32]),
+                                    AccountId::from([2u8; 32]),
+                                    AccountId::from([3u8; 32])
+                                ]
+                                .encode()
+                            )
+                        ))
+                    }
+                    "state_getStorage" => serde_json::Value::Null,
+                    "system_accountNextIndex" => json!(5),
+                    "chain_getHeader" => json!({"number": "0x64"}),
+                    "chain_getBlockHash" => json!(format!("{:?}", H256::repeat_byte(3))),
+                    other => return Err(format!("not mocked: {other}")),
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn preparing_admission_params_checks_version_bounds_and_the_current_value() {
+        let cap = |v| AdmissionParamInfo {
+            param: AdmissionParam::CapPerRound,
+            value: v,
+        };
+        let e = prepare_admission_params_request(
+            &ParamsChain {
+                spec: 8,
+                txv: 1,
+                cap: None,
+            },
+            cap(3),
+        )
+        .unwrap_err();
+        assert!(e.contains("after the upgrade"), "{e}");
+        let now = ParamsChain {
+            spec: VERSION.spec_version,
+            txv: VERSION.transaction_version,
+            cap: None,
+        };
+        assert!(prepare_admission_params_request(&now, cap(17))
+            .unwrap_err()
+            .contains("outside the allowed range"));
+        assert!(
+            prepare_admission_params_request(&now, cap(2))
+                .unwrap_err()
+                .contains("already"),
+            "2 is the default (D54) already"
+        );
+        let votes0 = AdmissionParamInfo {
+            param: AdmissionParam::MaxVotesPerOperator,
+            value: 0,
+        };
+        assert!(prepare_admission_params_request(&now, votes0)
+            .unwrap_err()
+            .contains("outside the allowed range"));
+        let r = prepare_admission_params_request(&now, cap(3)).expect("a valid request");
+        assert_eq!(r.action, "admission-params");
+        assert_eq!(r.description, call_summary(&r.call().unwrap()).unwrap());
+        assert_eq!(
+            (r.transaction_version, r.params.transaction_version),
+            (VERSION.transaction_version, VERSION.transaction_version)
+        );
+        let stored = ParamsChain {
+            spec: VERSION.spec_version,
+            txv: VERSION.transaction_version,
+            cap: Some(3),
+        };
+        assert!(prepare_admission_params_request(&stored, cap(3))
+            .unwrap_err()
+            .contains("already"));
     }
 
     #[test]

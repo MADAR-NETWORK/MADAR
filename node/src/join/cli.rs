@@ -45,8 +45,11 @@ pub struct AutoRenewArgs {
     #[arg(long, default_value = "127.0.0.1:9944")]
     pub rpc: String,
     /// The voting node's secret file (JSON containing secretPhrase) — for genesis nodes whose account is their voting key.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "sealed_secret_file")]
     pub secret_file: Option<PathBuf>,
+    /// or the same file sealed with Windows protection (DPAPI) via `madar-node secret seal` — unsealed in memory only (Windows).
+    #[arg(long, conflicts_with = "account_file")]
+    pub sealed_secret_file: Option<PathBuf>,
     /// Or an encrypted operator account (.enc) with --passphrase-file.
     #[arg(long)]
     pub account_file: Option<PathBuf>,
@@ -339,6 +342,11 @@ fn exit(a: TxArgs) -> Result<(), String> {
 /// Run from a scheduler (hourly): renews only when the chain allows it, otherwise exits successfully without submitting anything. A real error (not a member/banned/network) = non-zero exit code.
 fn auto_renew(a: AutoRenewArgs) -> Result<(), String> {
     let acct = match (&a.secret_file, &a.account_file) {
+        _ if a.sealed_secret_file.is_some() => crate::sealed::load_account(
+            a.sealed_secret_file
+                .as_deref()
+                .expect("checked by the guard"),
+        )?,
         (Some(s), _) => Account::from_secret_json(s)?,
         (None, Some(f)) => {
             let pass = if a.passphrase_stdin {
@@ -359,7 +367,9 @@ fn auto_renew(a: AutoRenewArgs) -> Result<(), String> {
             }
             acct
         }
-        (None, None) => return Err("Specify --secret-file or --account-file".into()),
+        (None, None) => {
+            return Err("Give --secret-file or --sealed-secret-file or --account-file".into())
+        }
     };
     let t = HttpRpc::new(&a.rpc);
     let who = acct.id();

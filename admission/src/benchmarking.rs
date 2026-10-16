@@ -2,10 +2,11 @@
 //!
 //! Every benchmark builds the worst case that `weights.rs` assumes: `Validators` at `MaxValidators`, the open round
 //! plus all `MAX_PENDING_POOLS` closed pools full (`MaxCandidatesPerRound` each), the target account last in every
-//! list it is scanned from. `ban_key` and `dev_only_force_set_validators` are closed in the runtime
-//! (`AdminOrigin = EnsureNever`), so their benchmarks run the body directly (`Pallet::ban`, used by equivocation
-//! reports, and `set_validators_with_fresh_terms`). `new_session` is a hook, not a call: it is run directly in three
-//! worst-case shapes (mass exits, mass expiry, full set in grace), each with four closed pools ready to draw.
+//! list it is scanned from. `ban` is not a call (`ban_key` was removed in spec 9): its benchmark runs `Pallet::ban`,
+//! the body of every equivocation report. `new_session` is a hook, not a call: it is run directly in three worst-case
+//! shapes (mass exits, mass expiry, full set in grace), each with four closed pools ready to draw.
+//! spec 9: operators get the hard limit `MaxVotesPerOperatorLimit` (the stored committee cap is raised to it), so the
+//! eviction paths run with a full vouch list.
 
 use super::*;
 use alloc::{vec, vec::Vec};
@@ -99,7 +100,7 @@ pub fn setup_new_session<T: crate::BenchmarkHelper>(case: SessionCase) -> u32 {
 
     let validators: Vec<T::AccountId> = (0..max).map(|i| acc::<T>("validator", i)).collect();
     for (i, v) in validators.iter().enumerate() {
-        ApprovedOperators::<T>::insert(v, T::MaxVotesPerOperator::get());
+        ApprovedOperators::<T>::insert(v, T::MaxVotesPerOperatorLimit::get());
         T::register_session_keys(v);
         let expiry = match case {
             SessionCase::Exits => new_index + term,
@@ -122,7 +123,7 @@ pub fn setup_new_session<T: crate::BenchmarkHelper>(case: SessionCase) -> u32 {
                 let cand = acc::<T>("session_candidate", id);
                 let op = acc::<T>("session_candidate_operator", id);
                 T::register_session_keys(&cand);
-                ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperator::get());
+                ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperatorLimit::get());
                 NodeOperator::<T>::insert(&cand, op);
                 (cand, [0xffu8; 32])
             })
@@ -137,7 +138,33 @@ pub fn setup_new_session<T: crate::BenchmarkHelper>(case: SessionCase) -> u32 {
     Pending::<T>::put(BoundedVec::truncate_from(pending));
     EntropyCount::<T>::put(1_000_000u64);
     T::set_block_vrf(9);
+    MaxVotesPerOperator::<T>::put(T::MaxVotesPerOperatorLimit::get());
+    AdmissionCapPerRound::<T>::put(T::AdmissionCapPerRoundLimit::get());
     new_index
+}
+
+/// spec 9: the committee caps at their hard limits (worst case for every path that reads them).
+fn max_caps<T: Config>() {
+    MaxVotesPerOperator::<T>::put(T::MaxVotesPerOperatorLimit::get());
+    AdmissionCapPerRound::<T>::put(T::AdmissionCapPerRoundLimit::get());
+}
+
+/// `op`'s own seat and a full vouch list (`MaxVotesPerOperatorLimit` nodes), all live, last in a full set; the nodes
+/// are in every full pool. Returns the nodes.
+fn operator_with_full_list<T: Config>(op: &T::AccountId) -> Vec<T::AccountId> {
+    let limit = T::MaxVotesPerOperatorLimit::get();
+    let nodes: Vec<T::AccountId> = (0..limit).map(|i| acc::<T>("operator_node", i)).collect();
+    let mut extra = vec![op.clone()];
+    extra.extend(nodes.iter().cloned());
+    set_validators::<T>(T::MaxValidators::get() - extra.len() as u32, &extra);
+    max_caps::<T>();
+    ApprovedOperators::<T>::insert(op, limit);
+    for n in &nodes {
+        NodeOperator::<T>::insert(n, op.clone());
+    }
+    OperatorNodes::<T>::insert(op, BoundedVec::truncate_from(nodes.clone()));
+    fill_pools::<T>(nodes.last());
+    nodes
 }
 
 fn run_new_session<T: Config>(index: u32) -> Option<Vec<T::AccountId>> {
@@ -155,8 +182,10 @@ mod benchmarks {
         T::set_epoch_randomness(BENCH_EPOCH_RANDOMNESS);
         let who = acc::<T>("candidate", 0);
         let op = acc::<T>("operator", 0);
-        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperator::get());
-        NodeOperator::<T>::insert(&who, op);
+        max_caps::<T>();
+        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperatorLimit::get());
+        NodeOperator::<T>::insert(&who, op.clone());
+        SolutionAttempts::<T>::insert(&op, (CurrentSession::<T>::get(), 1u32));
         set_validators::<T>(T::MaxValidators::get(), &[]);
         let seed = T::EpochRandomness::random(madar_protocol::ADMISSION_PUZZLE_DOMAIN).0;
         Round::<T>::put((seed, full_pool::<T>("round", 0, None)));
@@ -170,12 +199,14 @@ mod benchmarks {
     }
 
     /// Most expensive early rejection (before Argon2): full validator set scanned, then the full pool scanned with the
-    /// caller in the last slot (`AlreadyAdmittedThisRound`).
+    /// caller in the last slot (`AlreadyAdmittedThisRound`). spec 9 (independent review #6): the caller has no account
+    /// yet, so this is the onboarding refusal (success + `SolutionRefused` event), the heavier of the two.
     #[benchmark]
     fn submit_admission_rejected_early() -> Result<(), BenchmarkError> {
         let who = acc::<T>("candidate", 0);
         let op = acc::<T>("operator", 0);
-        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperator::get());
+        max_caps::<T>();
+        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperatorLimit::get());
         NodeOperator::<T>::insert(&who, op);
         set_validators::<T>(T::MaxValidators::get(), &[]);
         let seed = T::EpochRandomness::random(madar_protocol::ADMISSION_PUZZLE_DOMAIN).0;
@@ -188,7 +219,10 @@ mod benchmarks {
                 Pallet::<T>::submit_admission_solution(RawOrigin::Signed(who.clone()).into(), 0);
         }
 
-        assert!(result.is_err());
+        assert!(
+            result.is_ok(),
+            "a key without an account is refused with an event, so its nonce moves"
+        );
         Ok(())
     }
 
@@ -204,9 +238,9 @@ mod benchmarks {
         Ok(())
     }
 
-    /// `ban_key` body (`Pallet::ban`, also the equivocation path): member last in a full set and in every full pool.
+    /// `Pallet::ban` (the equivocation path): member last in a full set and in every full pool.
     #[benchmark]
-    fn ban_key() -> Result<(), BenchmarkError> {
+    fn ban() -> Result<(), BenchmarkError> {
         let who = acc::<T>("offender", 0);
         set_validators::<T>(T::MaxValidators::get() - 1, &[who.clone()]);
         fill_pools::<T>(Some(&who));
@@ -219,25 +253,6 @@ mod benchmarks {
 
         assert!(BannedKeys::<T>::contains_key(&who));
         assert!(!Validators::<T>::get().contains(&who));
-        Ok(())
-    }
-
-    /// `dev_only_force_set_validators` body: a full old set fully replaced by `n` new members.
-    #[benchmark]
-    fn dev_only_force_set_validators(
-        n: Linear<1, { T::MaxValidators::get() }>,
-    ) -> Result<(), BenchmarkError> {
-        set_validators::<T>(T::MaxValidators::get(), &[]);
-        let new: Vec<T::AccountId> = (0..n).map(|i| acc::<T>("new_validator", i)).collect();
-
-        #[block]
-        {
-            let bounded: BoundedVec<T::AccountId, T::MaxValidators> =
-                new.try_into().expect("n <= MaxValidators");
-            Pallet::<T>::set_validators_with_fresh_terms(bounded);
-        }
-
-        assert_eq!(Validators::<T>::get().len() as u32, n);
         Ok(())
     }
 
@@ -301,17 +316,13 @@ mod benchmarks {
         Ok(())
     }
 
-    /// Lower a cap to 0 with the operator's own seat and its vouched node live: full set scanned (`NodeOperator` read
-    /// per member), both evicted from the set and from every full pool.
+    /// Lower a cap to 0 with the operator's own seat and a full vouch list live: full set scanned (`NodeOperator` read
+    /// per member), all evicted from the set and from every full pool.
     #[benchmark]
     fn approve_operator() -> Result<(), BenchmarkError> {
         let op = acc::<T>("operator", 0);
-        let node = acc::<T>("operator_node", 0);
-        set_validators::<T>(T::MaxValidators::get() - 2, &[op.clone(), node.clone()]);
-        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperator::get());
-        NodeOperator::<T>::insert(&node, op.clone());
-        OperatorNodes::<T>::insert(&op, BoundedVec::truncate_from(vec![node.clone()]));
-        fill_pools::<T>(Some(&node));
+        let nodes = operator_with_full_list::<T>(&op);
+        let node = nodes.last().cloned().expect("limit >= 1");
         let origin = T::OperatorApprovalOrigin::try_successful_origin()
             .map_err(|_| BenchmarkError::Weightless)?;
 
@@ -327,12 +338,8 @@ mod benchmarks {
     #[benchmark]
     fn revoke_operator_approval() -> Result<(), BenchmarkError> {
         let op = acc::<T>("operator", 0);
-        let node = acc::<T>("operator_node", 0);
-        set_validators::<T>(T::MaxValidators::get() - 2, &[op.clone(), node.clone()]);
-        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperator::get());
-        NodeOperator::<T>::insert(&node, op.clone());
-        OperatorNodes::<T>::insert(&op, BoundedVec::truncate_from(vec![node.clone()]));
-        fill_pools::<T>(Some(&node));
+        operator_with_full_list::<T>(&op);
+        SolutionAttempts::<T>::insert(&op, (0u32, 1u32));
         let origin = T::OperatorApprovalOrigin::try_successful_origin()
             .map_err(|_| BenchmarkError::Weightless)?;
 
@@ -350,7 +357,8 @@ mod benchmarks {
         let op = acc::<T>("operator", 0);
         let node = acc::<T>("operator_node", 0);
         set_validators::<T>(T::MaxValidators::get(), &[]);
-        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperator::get());
+        max_caps::<T>();
+        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperatorLimit::get());
 
         #[extrinsic_call]
         _(RawOrigin::Signed(op.clone()), node.clone());
@@ -365,7 +373,7 @@ mod benchmarks {
         let op = acc::<T>("operator", 0);
         let node = acc::<T>("operator_node", 0);
         set_validators::<T>(T::MaxValidators::get() - 1, &[node.clone()]);
-        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperator::get());
+        ApprovedOperators::<T>::insert(&op, T::MaxVotesPerOperatorLimit::get());
         NodeOperator::<T>::insert(&node, op.clone());
         OperatorNodes::<T>::insert(&op, BoundedVec::truncate_from(vec![node.clone()]));
         fill_pools::<T>(Some(&node));
@@ -375,6 +383,34 @@ mod benchmarks {
 
         assert!(!NodeOperator::<T>::contains_key(&node));
         assert!(!Validators::<T>::get().contains(&node));
+        Ok(())
+    }
+
+    /// spec 9 — `set_admission_cap_per_round` (the two setters do the same work: one bound check, one value, one event).
+    #[benchmark]
+    fn set_admission_param() -> Result<(), BenchmarkError> {
+        let origin = T::OperatorApprovalOrigin::try_successful_origin()
+            .map_err(|_| BenchmarkError::Weightless)?;
+        let cap = T::AdmissionCapPerRoundLimit::get();
+
+        #[extrinsic_call]
+        set_admission_cap_per_round(origin as T::RuntimeOrigin, cap);
+
+        assert_eq!(AdmissionCapPerRound::<T>::get(), cap);
+        Ok(())
+    }
+
+    /// spec 9 — `set_max_votes_per_operator` (measured too, to check both stay under `set_admission_param()`).
+    #[benchmark]
+    fn set_max_votes_per_operator() -> Result<(), BenchmarkError> {
+        let origin = T::OperatorApprovalOrigin::try_successful_origin()
+            .map_err(|_| BenchmarkError::Weightless)?;
+        let votes = T::MaxVotesPerOperatorLimit::get();
+
+        #[extrinsic_call]
+        _(origin as T::RuntimeOrigin, votes);
+
+        assert_eq!(MaxVotesPerOperator::<T>::get(), votes);
         Ok(())
     }
 }

@@ -101,9 +101,8 @@ pub type UpgradeApprovedOrigin = EnsureProportionAtLeast<AccountId, UpgradeCommi
 /// and no real distribution (see the module comment above). `u128` is standard across the whole
 /// Substrate ecosystem, not an economic decision in itself.
 pub type Balance = u128;
-/// A non-final placeholder (the same logic as D19/D22/D24/D26) — it has no economic meaning
-/// here because no account is funded with any balance in genesis (`balances: vec![]`); its
-/// only value is purely technical: preventing dust accounts in `pallet-balances` itself.
+/// A purely technical value (no economic meaning here, because no account is funded with any balance in Genesis, `balances: vec![]`): prevents
+/// Dust Accounts in `pallet-balances` itself. Reviewed together with the economic decisions, not before.
 pub const EXISTENTIAL_DEPOSIT: Balance = 500;
 
 /// Account/signature identity — reuses `madar-identity` (Identity phase)
@@ -142,110 +141,26 @@ pub mod opaque {
     pub type Block = generic::Block<Header, UncheckedExtrinsic>;
 }
 
-/// The standard execution engine — no custom execution logic (`frame_executive` as it is), with the one-time D55 and Madar Names migrations.
+/// The standard execution engine — no custom execution logic (`frame_executive` as is). The only spec 9 migration: the Admission storage version
+/// (0 → 1, no data change). The two one-time seeding migrations (`SeedFirstStamper` spec 6, `SeedNames` spec 7) were removed in spec 9:
+/// they ran on the live network (spec 6 then 7, and it was then on 8) and had become no-ops because of
+/// their markers; the two markers stay in storage with no effect.
 pub type Executive = frame_executive::Executive<
     Runtime,
     Block,
     frame_system::ChainContext<Runtime>,
     Runtime,
     AllPalletsWithSystem,
-    (SeedFirstStamper, SeedNames),
+    madar_admission::migrations::V0ToV1<Runtime>,
 >;
 
-/// The first account of the Madar Stamp service (D55) — the only stamper at activation. Its secret is encrypted outside the repository
-/// and it has no authority except `Stamp::stamp`; replacing/removing it is a 2-of-3 committee decision.
+/// The first account of the "Madar Stamp" service (D55) — seeded as a registrar for the stamp (spec 6) and for names (spec 7). Its secret is encrypted outside the repository
+/// (`stamper.enc`); replacing/removing it is a 2-of-3 committee decision. Reference only (the Runtime no longer uses it after the seeding migrations were removed).
 /// SS58: eYg3neSEXwFuJGQQR5NxiSdGsFgewSN2B8Bg4oVVxrn7bD1GE
 pub const FIRST_STAMPER: [u8; 32] = [
     0xc4, 0x0a, 0x6c, 0xf4, 0x87, 0xbe, 0x89, 0xad, 0x2c, 0xbe, 0x5e, 0x9c, 0x39, 0xc8, 0xf3, 0xad,
     0x24, 0x06, 0xe3, 0x61, 0x12, 0xe1, 0x30, 0x53, 0xab, 0x8e, 0x82, 0x50, 0x58, 0xd7, 0x7b, 0x48,
 ];
-
-/// D55 migration: seeds the first stamper **exactly once** (guarded by an independent storage marker), and never touches any
-/// later committee decision. The committee's approval of this upgrade's code = its approval of this account, so no second vote is needed.
-pub struct SeedFirstStamper;
-/// The "first stamper seeded" marker — an independent storage key, not the pallet storage version: FRAME sets the version of any new pallet
-/// automatically **before** runtime migrations, so a guard built on it would always skip the seeding (found by the isolated upgrade drill on 2026-10-01).
-pub const FIRST_STAMPER_SEEDED_KEY: &[u8] = b"madar:stamp:first-stamper-seeded";
-impl frame_support::traits::OnRuntimeUpgrade for SeedFirstStamper {
-    fn on_runtime_upgrade() -> Weight {
-        use frame_support::traits::Get;
-        // Once in the network's lifetime: after seeding the marker is written, so no later upgrade repeats it, even if the committee deliberately emptied the list.
-        if frame_support::storage::unhashed::exists(FIRST_STAMPER_SEEDED_KEY) {
-            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
-        }
-        let _ = madar_stamp::Stampers::<Runtime>::try_mutate(|s| {
-            s.try_push(AccountId::from(FIRST_STAMPER))
-        });
-        frame_support::storage::unhashed::put(FIRST_STAMPER_SEEDED_KEY, &true);
-        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(2, 2)
-    }
-}
-
-/// One-time Madar Names migration (spec 7): the service account itself (FIRST_STAMPER) becomes the first registrar, and the most
-/// important forbidden names are reserved on chain from the first block. The committee's approval of the upgrade code = its approval
-/// of all of this; after that any change is by 2-of-3 decision only. The full list (thousands of names and impersonation detection)
-/// lives in the registration service.
-pub struct SeedNames;
-pub const NAMES_SEEDED_KEY: &[u8] = b"madar:names:seeded";
-/// MADAR names and the most dangerous impersonation words — reserved on the chain itself.
-pub const NAMES_RESERVED_AT_LAUNCH: &[&str] = &[
-    "madar",
-    "madar-network",
-    "madarnetwork",
-    "madar-official",
-    "madarofficial",
-    "madar-team",
-    "madar-support",
-    "madarswap",
-    "madar-swap",
-    "madarstamp",
-    "madar-stamp",
-    "madarwallet",
-    "madar-wallet",
-    "madarops",
-    "madar-ops",
-    "madar-names",
-    "madarnames",
-    "madar-admin",
-    "madar-help",
-    "madar-security",
-    "admin",
-    "administrator",
-    "root",
-    "system",
-    "official",
-    "support",
-    "helpdesk",
-    "help-desk",
-    "security",
-    "verify",
-    "verification",
-    "recovery",
-    "refund",
-    "airdrop",
-    "giveaway",
-    "wallet-connect",
-    "walletconnect",
-];
-impl frame_support::traits::OnRuntimeUpgrade for SeedNames {
-    fn on_runtime_upgrade() -> Weight {
-        use frame_support::traits::Get;
-        if frame_support::storage::unhashed::exists(NAMES_SEEDED_KEY) {
-            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
-        }
-        let _ = madar_names::Registrars::<Runtime>::try_mutate(|s| {
-            s.try_push(AccountId::from(FIRST_STAMPER))
-        });
-        for n in NAMES_RESERVED_AT_LAUNCH {
-            if let Ok(name) = madar_names::NameOf::try_from(n.as_bytes().to_vec()) {
-                madar_names::Reserved::<Runtime>::insert(name, ());
-            }
-        }
-        frame_support::storage::unhashed::put(NAMES_SEEDED_KEY, &true);
-        let n = NAMES_RESERVED_AT_LAUNCH.len() as u64;
-        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(2, 2 + n)
-    }
-}
 
 construct_runtime!(
     pub enum Runtime {
@@ -281,7 +196,17 @@ pub struct OnboardingPolicy;
 impl madar_transactions::AccountCreationPolicy<AccountId, RuntimeCall> for OnboardingPolicy {
     fn may_create_account(who: &AccountId, call: &RuntimeCall) -> bool {
         match call {
-            RuntimeCall::Admission(madar_admission::Call::submit_admission_solution { .. }) => true,
+            // spec 9: only a vouched node (D47/B2) may create its account with its first solution. Before, ANY fresh key was
+            // accepted into the pool here, failed cheaply at dispatch (`NodeNotVouched`), left no account and no nonce, and
+            // so could be signed for free from endless new keys (and replayed) to fill block space.
+            // (a current member renewing is accepted too: it has an account already, this only guards an odd founding seat)
+            RuntimeCall::Admission(madar_admission::Call::submit_admission_solution { .. }) => {
+                // spec 9 (independent review #5): O(1) reads only — `MembershipExpiry` is kept for exactly the members (set
+                // on admission/genesis, removed with the seat), so the pool check no longer decodes the whole member list
+                // for every fresh key.
+                madar_admission::NodeOperator::<Runtime>::contains_key(who)
+                    || madar_admission::MembershipExpiry::<Runtime>::contains_key(who)
+            }
             // B2 (spec 9): a candidate must be vouched before it applies, so an approved operator that has no account yet
             // must be able to create it with its first vouch (only operators the 2-of-3 committee approved).
             RuntimeCall::Admission(madar_admission::Call::vouch_node { .. }) => {
@@ -293,16 +218,20 @@ impl madar_transactions::AccountCreationPolicy<AccountId, RuntimeCall> for Onboa
                 | pallet_collective::Call::close { .. },
             ) => pallet_collective::Pallet::<Runtime, UpgradeCommitteeInstance>::is_member(who),
             // Madar Stamp: the approved stamper account (by 2-of-3 committee decision) is created at its first batch.
-            RuntimeCall::Stamp(madar_stamp::Call::stamp { .. }) => {
-                madar_stamp::Pallet::<Runtime>::is_stamper(who)
-            }
-            // Madar Names: the approved registrar account only.
+            RuntimeCall::Stamp(
+                madar_stamp::Call::stamp { .. } | madar_stamp::Call::stamp_v2 { .. },
+            ) => madar_stamp::Pallet::<Runtime>::is_stamper(who),
+            // Madar Names: the approved registrar account only (spec 9: the v2 calls and transfer under the same condition).
             RuntimeCall::Names(
                 madar_names::Call::register { .. }
                 | madar_names::Call::renew { .. }
                 | madar_names::Call::cancel_offer { .. }
                 | madar_names::Call::lock_sale_v2 { .. }
-                | madar_names::Call::complete_sale_v2 { .. },
+                | madar_names::Call::complete_sale_v2 { .. }
+                | madar_names::Call::register_v2 { .. }
+                | madar_names::Call::lock_sale_v3 { .. }
+                | madar_names::Call::cancel_offer_v2 { .. }
+                | madar_names::Call::transfer { .. },
             ) => madar_names::Pallet::<Runtime>::is_registrar(who),
             _ => false,
         }
@@ -366,7 +295,9 @@ impl pallet_babe::Config for Runtime {
     // `ExternalTrigger`: we rely on `pallet_session` to trigger the epoch change
     // (the standard wiring when a session pallet exists) — no custom internal trigger.
     type EpochChangeTrigger = pallet_babe::ExternalTrigger;
-    type DisabledValidators = (); // no disabling yet — handled by Admission/Sybil.
+    // spec 9: an account banned by an Equivocation proof is disabled in BABE **immediately** (its block is rejected), not after two rotations — through
+    // the standard `pallet_session` and `MadarDisablingStrategy` (the last one is never disabled, and never more than a third). See `BanOnOffence`.
+    type DisabledValidators = Session;
     type WeightInfo = sdk_weights::BabeWeights;
     type MaxAuthorities = ConstU32<1_000>;
     type MaxNominators = ConstU32<0>; // no nomination (no stake, D5/D21).
@@ -445,15 +376,14 @@ impl pallet_session::Config for Runtime {
     type ShouldEndSession = Babe;
     type NextSessionRotation = Babe;
     /// `()` was replaced by the actual Admission (§2.9) — see the module comment above.
-    type SessionManager = pallet_session::historical::NoteHistoricalRoot<Runtime, Admission>;
+    type SessionManager =
+        pallet_session::historical::NoteHistoricalRoot<Runtime, MadarSessionManager>;
     type SessionHandler = (Babe, Grandpa);
     type Keys = SessionKeys;
-    // Required now by `pallet_session::Config` (D40/D41 — SDK upgrade); standard
-    // wiring that is not actually activated here: the only trigger for disabling a key is a real equivocation
-    // report (implemented now through `BanOnOffence` = a permanent ban, not temporary disabling) — no
-    // actual behavior change, only satisfying the new trait bound.
-    type DisablingStrategy = pallet_session::disabling::UpToLimitWithReEnablingDisablingStrategy;
-    type WeightInfo = ();
+    // spec 9: the only trigger for disabling is a proven Equivocation (`BanOnOffence`); the decision is in `MadarDisablingStrategy`.
+    type DisablingStrategy = MadarDisablingStrategy;
+    /// spec 9 (B1): `set_keys`/`purge_keys` weights measured on Madar (they were `()`).
+    type WeightInfo = sdk_weights::SessionWeights;
     // **D42** — required now by `pallet_session::Config` (SDK upgrade to
     // stable2606-2). `KeyDeposit = ()` (always zero) means the hold required
     // when registering a session key is always accepted regardless of the account's balance — no
@@ -463,7 +393,7 @@ impl pallet_session::Config for Runtime {
 }
 
 /// The runtime version — the first actual version (spec version 1), no production assumption.
-/// The actual spec_version = 9 (B2: no candidacy and no draw entry without a vouch from an approved operator, and the operator's account is created by its first vouch; the two old v1 sale calls removed; before it 8 for the payment proof in the safe sale: lock_sale_v2/complete_sale_v2, with the 2026-10-12 names security fixes in the same upgrade; before it 7 for Madar Names, 6 for D55 Madar Stamp, 5 for D54 `AdmissionCapPerRound` 5→2, 4 for closing N1, and 3 for the ban_key weight in B1). The `upgrade-fixture` feature makes it 10.
+/// The actual spec_version = 9, and `transaction_version` = 2 because calls were removed (Admission 2 and 3, and the v1 sale calls in names). (B2: no candidacy and no draw entry without a vouch from an approved operator, and the operator's account is created with its first vouch; and removal of the two old v1 sale calls; before that 8 for the payment proof in safe sale: lock_sale_v2/complete_sale_v2, with the names security fixes of 2026-10-12 in the same upgrade; before that 7 for Madar Names, 6 for D55 Madar Stamp, 5 for D54 `AdmissionCapPerRound` 5→2, 4 for closing N1, and 3 for the ban_key weight in B1). The `upgrade-fixture` feature makes it 10.
 #[cfg(not(feature = "upgrade-fixture"))]
 #[sp_version::runtime_version]
 pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
@@ -473,7 +403,9 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_version: 9,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
-    transaction_version: 1,
+    // spec 9: 1 → 2 — calls were removed (Admission `ban_key`=2 and `dev_only_force_set_validators`=3, and names v1), so a transaction
+    // signed for them before the upgrade does not decode after it. The committee tool still serves a spec ≤ 8 chain with tx 1 to pass the upgrade itself.
+    transaction_version: 2,
     // Renamed from `state_version` to `system_version` in the SDK itself
     // (D40/D41 — SDK upgrade) — no semantic change.
     system_version: 1,
@@ -487,7 +419,9 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_version: 10,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
-    transaction_version: 1,
+    // spec 9: 1 → 2 — calls were removed (Admission `ban_key`=2 and `dev_only_force_set_validators`=3, and names v1), so a transaction
+    // signed for them before the upgrade does not decode after it. The committee tool still serves a spec ≤ 8 chain with tx 1 to pass the upgrade itself.
+    transaction_version: 2,
     // Renamed from `state_version` to `system_version` in the SDK itself
     // (D40/D41 — SDK upgrade) — no semantic change.
     system_version: 1,
@@ -693,8 +627,7 @@ sp_api::impl_runtime_apis! {
 }
 
 impl madar_admission::Config for Runtime {
-    type RuntimeEvent = RuntimeEvent;
-    // Membership term of 84 epochs (~7 days at Epoch=2h) + a grace of 12 epochs (~a day) — placeholders (D27).
+    // Membership term 84 Epochs (~7 days at Epoch=2h) + grace 12 Epochs (~1 day) — placeholders (D27/D28) until ARM64 measurement.
     type MembershipTermSessions = ConstU32<MEMBERSHIP_TERM_SESSIONS>;
     type RenewalGraceSessions = ConstU32<RENEWAL_GRACE_SESSIONS>;
     type MaxCandidatesPerRound = ConstU32<64>;
@@ -706,32 +639,32 @@ impl madar_admission::Config for Runtime {
     type BlockRandomness = pallet_babe::ParentBlockRandomness<Runtime>;
     // The minimum fresh VRFs before the draw: 16 blocks (production) — 4 in the isolated live build.
     type MinFreshEntropyBlocks = ConstU32<MIN_FRESH_ENTROPY_BLOCKS>;
-    // Placeholder (D26/D27) — non-final, settled by actual benchmarking/security testing
-    // before the public testnet (the same pattern as D19/D22/D24).
+    // 13 bits — owner decision 2026-09-28 (final; see `PUZZLE_DIFFICULTY_BITS`).
     type DifficultyLeadingZeroBits = ConstU32<PUZZLE_DIFFICULTY_BITS>;
-    // D54 — owner decision (2026-09-23): at most 2 winners per round on the limited testnet (it was 5,
-    // a placeholder). Raising it to 3 and then 5 needs an explicit owner decision once there are independent operators and enough monitoring.
-    type AdmissionCapPerRound = ConstU32<2>;
+    // D54 — owner decision (2026-09-23): at most 2 winners **per rotation** (all pools drawn in it together since spec 9).
+    // spec 9: the value is in storage and is changed by the 2-of-3 committee (`set_admission_cap_per_round`) within 0..=16 — the hard limit 16
+    // (`MaxCandidatesPerRound` 64 ≥ 16). Raising it to 3 and then 5 stays an explicit owner decision (D54); the committee is the execution tool.
+    type DefaultAdmissionCapPerRound = ConstU32<2>;
+    type AdmissionCapPerRoundLimit = ConstU32<16>;
     type MaxValidators = ConstU32<1_000>;
     // D47 — resistance to identity duplication through one operator: the same 2-of-3 committee (D44/D45)
     // is the only party able to approve an operator or revoke its approval. The system never relies
     // on any name the operator types itself.
     type OperatorApprovalOrigin = UpgradeApprovedOrigin;
-    // N1 — `ban_key` and `dev_only_force_set_validators`
-    // are completely closed: no origin reaches them, not even Root through the committee's `dispatch_as_root`. The production ban
-    // goes through equivocation only (`BanOnOffence` → `Admission::ban`). Tested: `tests/admin_calls_closed.rs`.
-    type AdminOrigin = frame_system::EnsureNever<()>;
-    // D52 — **a final decision approved by the founder (2026-09-23), not a placeholder:**
+    // N1 then spec 9: `ban_key` and `dev_only_force_set_validators` were removed from the Pallet (their indices 2 and 3 are never reused).
+    // Banning only through Equivocation (`BanOnOffence` → `Admission::ban`). Tested: `tests/admin_calls_closed.rs`.
+    // D52 — **final decision approved by the founder (2026-09-23):**
     // exactly one vote per operator, regardless of the source of its seat (a vouch or a
     // founding genesis/dev-only seat) — including the founding node itself if it belongs to it.
     // Justified by actual GRANDPA safety: no blocking vote can be tolerated from any single party unless
     // it holds less than 1/3 of the total weight; a cap of 1 guarantees that whatever the actual network size
     // at launch (see the internal design document,
     // §"Phase 1 scope", for the full analysis). Raising it later (if needed as the network grows)
-    // is a new explicit policy decision, not a silent change.
-    type MaxVotesPerOperator = ConstU32<1>;
-    // Placeholder (D26) — non-final Argon2id values, awaiting actual benchmarking
-    // on the hardware target (D23).
+    // a new explicit policy decision, not a silent change. spec 9: the value is in storage and is changed by the 2-of-3 committee
+    // (`set_max_votes_per_operator`) within 1..=4 — the hard limit 4 that no governance can exceed.
+    type DefaultMaxVotesPerOperator = ConstU32<1>;
+    type MaxVotesPerOperatorLimit = ConstU32<4>;
+    // Placeholder (D26) — the Argon2id values are frozen after ARM64 measurement (D23, B2 §4 proposal 2).
     type ArgonMemoryCostKib = ConstU32<19_456>;
     type ArgonTimeCost = ConstU32<2>;
     // The real Argon2 cost is derived from the two parameters above (see `madar_admission::weights`).
@@ -739,9 +672,8 @@ impl madar_admission::Config for Runtime {
 }
 
 parameter_types! {
-    /// A technical maximum (roughly a full block weight) for any call decided by the committee —
-    /// a not precisely measured placeholder (the same pattern as D19/D22/D24); it does not restrict the kind of
-    /// call itself, only a defensive execution cap.
+    /// A technical maximum (half the block weight, 1 s of 2 s) for any call the committee decides —
+    /// it does not restrict the kind of call itself, only a defensive execution cap (the measured `set_code` ≈ 220 ms).
     /// **The proof size (proof_size) is no longer 0:** after accounting the inner call's weight in
     /// `dispatch_as_root`, any Root proposal (such as `set_code`) has a proof weight > 0, and
     /// a cap of 0 would reject every proposal with `WrongProposalWeight`.
@@ -757,8 +689,8 @@ impl pallet_collective::Config<UpgradeCommitteeInstance> for Runtime {
     type RuntimeEvent = RuntimeEvent;
     /// A minimum voting window before an early close is possible with the default values
     /// (abstention → `false` via `PrimeDefaultVote` with no prime set, safe
-    /// by default) — a placeholder of one epoch (900 blocks), awaiting
-    /// an actual operational policy before the public testnet (the same pattern as D19/D22/D24).
+    /// by default) — one Epoch (900 blocks ≈ 2 hours), reviewed together with the committee's
+    /// operating policy.
     /// **It does not affect the essential security control:** `UpgradeApprovedOrigin`
     /// re-checks the actual vote ratio (`Members(yes, total)`) at
     /// execution regardless of this value or of the threshold chosen by the proposal's
@@ -788,7 +720,6 @@ impl pallet_collective::Config<UpgradeCommitteeInstance> for Runtime {
 /// at all. See `madar_upgrade_authority` (the full module comment there)
 /// and the internal design document.
 impl madar_upgrade_authority::Config for Runtime {
-    type RuntimeEvent = RuntimeEvent;
     type RuntimeCall = RuntimeCall;
     /// **The only security control for every Root call through this pallet** —
     /// a 2-of-3 threshold on `UpgradeCommittee`, without exception.
@@ -809,8 +740,8 @@ impl madar_stamp::Config for Runtime {
     type WeightInfo = madar_stamp::weights::ConservativeWeight<Runtime>;
 }
 
-// Madar Names (spec 7; payment proof in the safe sale spec 8): a yearly name bound to its owner's wallet by that wallet's signature, verified by the runtime. Registrars,
-// the reserved list and revocation for proven fraud are decided by the same upgrade committee (2-of-3).
+// Madar Names (spec 7; payment proof in safe sale spec 8): a yearly name bound to its owner's wallet by its signature, verified by the Runtime. The registrars,
+// the reserved list and withdrawal for proven fraud are decided by the upgrade committee itself (2-of-3).
 parameter_types! {
     /// Longest term that can be paid in advance: 10 years.
     pub const NamesMaxTermMs: u64 = 10 * 366 * 24 * 3600 * 1000;
@@ -864,7 +795,7 @@ pub const RENEWAL_GRACE_SESSIONS: u32 = 2;
 /// Puzzle difficulty (bits) — the same isolation (the Argon2 cost of every verification stays real).
 /// **B2 — owner decision 2026-09-28:** the target is ~5 minutes on average on a regular computer. Actually measured: 14 ms/attempt on an i7-12700KF
 /// (~35 ms on a regular computer ~2.5× slower) ⇒ 13 bits = 8192 attempts ≈ 4.8 minutes (regular) and ≈ 1.9 minutes (fast). The distribution is geometric:
-/// the mean is as stated, and sometimes several times more. Shipped with the next runtime upgrade.
+/// the average is as stated, and sometimes several times that. Final, and on the live network since spec 6.
 #[cfg(not(feature = "fast-test-runtime"))]
 pub const PUZZLE_DIFFICULTY_BITS: u32 = 13;
 #[cfg(feature = "fast-test-runtime")]
@@ -896,6 +827,17 @@ impl pallet_session::historical::Config for Runtime {
 /// ownership proof ends in a permanent ban of the offender's identity (`Admission::ban`): removal from the members and candidates
 /// and no re-admission. No monetary slashing (no stake, D21); the only penalty is losing the identity.
 pub struct BanOnOffence;
+
+/// Penalty for a proven offence: permanent ban (`Admission::ban`, with the B12 rule for the last one), then (spec 9) immediate disabling in BABE within the limits of
+/// `MadarDisablingStrategy` — its blocks are rejected from this block on. GRANDPA has no disabling in the SDK: it leaves the GRANDPA set through the
+/// usual rotation (two rotations) as before. Its weight is counted in the weight of the Equivocation report (`sdk_weights::EQUIVOCATION_EXTRA`).
+pub fn ban_and_disable(offender: &AccountId) {
+    Admission::ban(offender);
+    Session::report_offence(
+        offender.clone(),
+        sp_staking::offence::OffenceSeverity(sp_runtime::Perbill::one()),
+    );
+}
 impl<O> sp_staking::offence::ReportOffence<AccountId, (AccountId, ()), O> for BanOnOffence
 where
     O: sp_staking::offence::Offence<(AccountId, ())>,
@@ -905,7 +847,7 @@ where
         offence: O,
     ) -> Result<(), sp_staking::offence::OffenceError> {
         for (offender, _) in offence.offenders() {
-            Admission::ban(&offender);
+            ban_and_disable(&offender);
         }
         Ok(())
     }
@@ -917,6 +859,129 @@ where
             && offenders
                 .iter()
                 .all(|(who, _)| madar_admission::BannedKeys::<Runtime>::contains_key(who))
+    }
+}
+
+/// **spec 9 — the banned validator is disabled immediately in BABE (`pallet_session::DisabledValidators`).** Before this, a proven offender stayed a fully
+/// valid block producer until it left the session set after two rotations (up to ~4 hours). The decision:
+/// - the offender is outside the active set, or already disabled ⇒ nothing.
+/// - **Byzantine limit:** disabled validators never exceed `floor((n-1)/3)` of the active set (the same as the standard `UpToLimitDisablingStrategy`,
+///   without "re-enabling" others: all our offences are a permanent ban of the same severity). With 1–3 voters nobody is disabled.
+/// - **B12 (the last voters):** not disabled unless at least one block producer would remain in the active set that is **not disabled,
+///   still in Admission and not banned** — so the kept banned validator (`LastValidatorBannedButKept`) is never disabled, and nobody is disabled
+///   in favour of departing members only.
+/// Disabling does not touch GRANDPA (it has no disabling in the SDK; the client ignores `OnDisabled`), so it does not reduce the number of finality voters.
+pub struct MadarDisablingStrategy;
+impl pallet_session::disabling::DisablingStrategy<Runtime> for MadarDisablingStrategy {
+    fn decision(
+        offender: &AccountId,
+        _severity: sp_staking::offence::OffenceSeverity,
+        currently_disabled: &Vec<(u32, sp_staking::offence::OffenceSeverity)>,
+    ) -> pallet_session::disabling::DisablingDecision {
+        let active = pallet_session::Validators::<Runtime>::get();
+        // sets, so the scan stays O(n log n) even when most of a 1000-member active set has already left Admission
+        let staying: alloc::collections::BTreeSet<AccountId> =
+            madar_admission::Validators::<Runtime>::get()
+                .into_iter()
+                .collect();
+        madar_disabling_decision(offender, currently_disabled, &active, &staying)
+    }
+}
+
+/// The decision of [`MadarDisablingStrategy`] with the active set and the Admission members passed in, so
+/// [`MadarSessionManager::start_session`] builds them once for all banned keys (spec 9, independent review #7).
+fn madar_disabling_decision(
+    offender: &AccountId,
+    currently_disabled: &[(u32, sp_staking::offence::OffenceSeverity)],
+    active: &[AccountId],
+    staying: &alloc::collections::BTreeSet<AccountId>,
+) -> pallet_session::disabling::DisablingDecision {
+    {
+        let none = pallet_session::disabling::DisablingDecision {
+            disable: None,
+            reenable: None,
+        };
+        let Some(idx) = active.iter().position(|v| v == offender).map(|i| i as u32) else {
+            return none;
+        };
+        if currently_disabled.iter().any(|(i, _)| *i == idx) {
+            return none;
+        }
+        if currently_disabled.len()
+            >= pallet_session::disabling::UpToLimitDisablingStrategy::<3>::disable_limit(
+                active.len(),
+            )
+        {
+            return none;
+        }
+        let disabled: alloc::collections::BTreeSet<u32> =
+            currently_disabled.iter().map(|(i, _)| *i).collect();
+        let another_author_stays = active.iter().enumerate().any(|(i, v)| {
+            i as u32 != idx
+                && !disabled.contains(&(i as u32))
+                && staying.contains(v)
+                && !madar_admission::BannedKeys::<Runtime>::contains_key(v)
+        });
+        if !another_author_stays {
+            return none;
+        }
+        pallet_session::disabling::DisablingDecision {
+            disable: Some(idx),
+            reenable: None,
+        }
+    }
+}
+
+/// The actual `SessionManager`: Admission as is, then (spec 9) at the start of each session any banned validator still in the active set is
+/// disabled again. `pallet_session` clears the disabled list at every rotation in which the set changes, and a banned validator stays in the active set
+/// for one rotation after the ban (it was in the queued set); without this it would be a fully valid block producer again in that rotation.
+/// Only those who left the Admission record are checked (a banned validator is removed from it immediately, except the kept last one, which is never disabled).
+pub struct MadarSessionManager;
+impl pallet_session::SessionManager<AccountId> for MadarSessionManager {
+    fn new_session(new_index: u32) -> Option<Vec<AccountId>> {
+        <Admission as pallet_session::SessionManager<AccountId>>::new_session(new_index)
+    }
+    fn new_session_genesis(new_index: u32) -> Option<Vec<AccountId>> {
+        <Admission as pallet_session::SessionManager<AccountId>>::new_session_genesis(new_index)
+    }
+    fn start_session(start_index: u32) {
+        <Admission as pallet_session::SessionManager<AccountId>>::start_session(start_index);
+        // spec 9 (independent review #7): the active set and the Admission members are built once here, not again for
+        // every banned key (`madar_disabling_decision` takes them); the effect equals `Session::report_offence`.
+        let staying: alloc::collections::BTreeSet<AccountId> =
+            madar_admission::Validators::<Runtime>::get()
+                .into_iter()
+                .collect();
+        let active = pallet_session::Validators::<Runtime>::get();
+        let severity = sp_staking::offence::OffenceSeverity(sp_runtime::Perbill::one());
+        for v in active.iter() {
+            if !staying.contains(v) && madar_admission::BannedKeys::<Runtime>::contains_key(v) {
+                let disabled = pallet_session::DisabledValidators::<Runtime>::get();
+                if let Some(idx) = madar_disabling_decision(v, &disabled, &active, &staying).disable
+                {
+                    Session::disable_index_with_severity(idx, severity);
+                }
+            }
+        }
+    }
+    fn end_session(end_index: u32) {
+        <Admission as pallet_session::SessionManager<AccountId>>::end_session(end_index)
+    }
+}
+impl pallet_session::historical::SessionManager<AccountId, ()> for MadarSessionManager {
+    fn new_session(new_index: u32) -> Option<Vec<(AccountId, ())>> {
+        <Self as pallet_session::SessionManager<AccountId>>::new_session(new_index)
+            .map(|s| s.into_iter().map(|v| (v, ())).collect())
+    }
+    fn new_session_genesis(new_index: u32) -> Option<Vec<(AccountId, ())>> {
+        <Self as pallet_session::SessionManager<AccountId>>::new_session_genesis(new_index)
+            .map(|s| s.into_iter().map(|v| (v, ())).collect())
+    }
+    fn start_session(start_index: u32) {
+        <Self as pallet_session::SessionManager<AccountId>>::start_session(start_index)
+    }
+    fn end_session(end_index: u32) {
+        <Self as pallet_session::SessionManager<AccountId>>::end_session(end_index)
     }
 }
 

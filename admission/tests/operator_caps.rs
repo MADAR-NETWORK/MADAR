@@ -74,6 +74,7 @@ fn events() -> Vec<madar_admission::Event<TestRuntime>> {
 #[test]
 fn twenty_identities_one_operator_are_capped_at_the_approved_vote_limit() {
     new_test_ext().execute_with(|| {
+        pad_validators(9); // spec 9 review #1: room for 3 seats of one operator (floor((n-1)/3))
         let op = operator(1);
         // Independent governance (here: Root in the mock, a 2-of-3 committee in production,
         // see consensus/src/lib.rs) approves the operator with a cap of only 3 votes.
@@ -106,7 +107,17 @@ fn twenty_identities_one_operator_are_capped_at_the_approved_vote_limit() {
             rotate(100 + i);
         }
 
-        let live_validators: Vec<_> = A::validators().into_iter().filter(|v| identities.contains(v)).collect();
+        // spec 9: every identity ever admitted (the filler members keep the set non-empty, so admitted identities may
+        // have expired again by now — count the admissions, not only who is live at the end)
+        let mut live_validators: Vec<_> = events()
+            .into_iter()
+            .filter_map(|e| match e {
+                AdmissionEvent::Admitted { who, .. } if identities.contains(&who) => Some(who),
+                _ => None,
+            })
+            .collect();
+        live_validators.sort();
+        live_validators.dedup();
         assert!(
             live_validators.len() <= 3,
             "at most the approved cap (3) of this operator's 20 identities may ever become live validators; got {}",
@@ -125,6 +136,7 @@ fn twenty_identities_one_operator_are_capped_at_the_approved_vote_limit() {
         }
 
         // B2 (2026-10-14): an unvouched identity is refused explicitly at submission itself (no silent rejection and no crowding in the pool).
+        give_account(&identities[19]); // an existing account gets the error (spec 9 review #6)
         let r = submit_raw(&identities[19]);
         assert_eq!(r.unwrap_err().error, Error::<TestRuntime>::NodeNotVouched.into(), "unvouched identities are refused explicitly at submission");
     });
@@ -185,8 +197,8 @@ fn revoking_an_operators_approval_evicts_its_live_validators_immediately() {
     new_test_ext().execute_with(|| {
         // Another voter unrelated to this operator, so revoking the approval does not empty
         // the network completely (the new liveness guard, D50) and reject the operation unintentionally.
-        Admission::dev_only_force_set_validators(RuntimeOrigin::root(), vec![account(200)])
-            .unwrap();
+        force_validators(vec![account(200)]);
+        pad_validators(9); // spec 9 review #1: room for 3 seats of one operator (floor((n-1)/3))
 
         let op = operator(1);
         Admission::approve_operator(RuntimeOrigin::root(), op.clone(), 2).unwrap();
@@ -229,8 +241,7 @@ fn an_operator_can_revoke_a_single_nodes_vouch_and_it_is_evicted_immediately() {
     new_test_ext().execute_with(|| {
         // Another voter, so withdrawing this vouch does not empty the network completely (the new
         // liveness guard, D50).
-        Admission::dev_only_force_set_validators(RuntimeOrigin::root(), vec![account(200)])
-            .unwrap();
+        force_validators(vec![account(200)]);
 
         let op = operator(1);
         Admission::approve_operator(RuntimeOrigin::root(), op.clone(), 2).unwrap();
@@ -280,6 +291,7 @@ fn only_the_vouching_operator_can_revoke_its_own_vouch() {
 #[test]
 fn lowering_the_cap_below_currently_live_votes_evicts_the_excess_immediately() {
     new_test_ext().execute_with(|| {
+        pad_validators(9); // spec 9 review #1: room for 3 seats of one operator (floor((n-1)/3))
         let op = operator(1);
         Admission::approve_operator(RuntimeOrigin::root(), op.clone(), 3).unwrap();
         let (a, b, c) = (account(1), account(2), account(3));
@@ -331,6 +343,7 @@ fn lowering_the_cap_below_currently_live_votes_evicts_the_excess_immediately() {
 #[test]
 fn the_session_admission_cap_holds_even_if_the_approved_cap_is_lowered_after_vouching() {
     new_test_ext().execute_with(|| {
+        pad_validators(9); // spec 9 review #1: room for 3 seats of one operator (floor((n-1)/3))
         let op = operator(1);
         Admission::approve_operator(RuntimeOrigin::root(), op.clone(), 5).unwrap();
         let a = account(1);
@@ -386,7 +399,7 @@ fn an_operators_own_preexisting_seat_counts_against_its_cap_and_blocks_a_second_
         // "Network genesis seat": op itself is already a validator, without any vouch —
         // exactly as the real network introduces validators through genesis /
         // dev_only_force_set_validators (D25), completely separate from `vouch_node`.
-        Admission::dev_only_force_set_validators(RuntimeOrigin::root(), vec![op.clone()]).unwrap();
+        force_validators(vec![op.clone()]);
         Admission::approve_operator(RuntimeOrigin::root(), op.clone(), 1).unwrap();
 
         let winner = account(1);

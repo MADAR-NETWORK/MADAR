@@ -13,7 +13,7 @@ use core::marker::PhantomData;
 use frame_support::{traits::Get, weights::Weight};
 
 /// Picoseconds (ref_time) per Argon2id KiB-pass — see the calibration above.
-pub const ARGON2_PS_PER_KIB_PASS: u64 = 2_500_000;
+pub const ARGON2_PS_PER_KIB_PASS: u64 = 3_000_000; // spec 9 final (2026-10-16): 2.5 -> 3.0 us, 59.3 ms measured (spec9-final-weights.md)
 /// The cost of scanning/comparing one list element (32 bytes + decoding), with a conservative bound (0.5 µs).
 pub const SCAN_PS_PER_ITEM: u64 = 500_000;
 /// The cost of hashing/sorting one element in the draw (ordering) — conservative.
@@ -25,11 +25,8 @@ pub const POOLS: u64 = 5;
 /// B1 (2026-10-15, WASM on x86): `new_session` cost per validator. The worst measured shape (1000 members, all in grace)
 /// = 25.4 ms median and 27.3 ms max => 55 µs per member covers >= 2× the measured max (was 8 µs: 16 × `SCAN_PS_PER_ITEM`).
 pub const NEW_SESSION_PS_PER_VALIDATOR: u64 = 55_000_000;
-/// B1: measured `dev_only_force_set_validators(n)` = 1.21 ms + 2.18 µs × n (WASM). 3.5 µs per item of (V + n)
-/// covers >= 2× the median at every measured n (1..999).
-pub const FORCE_SET_PS_PER_ITEM: u64 = 3_500_000;
 /// B1: `approve_operator` reads `NodeOperator` for every validator (1000) — 1.86 ms measured => 4 µs per item (>= 2×).
-pub const OPERATOR_SCAN_PS_PER_ITEM: u64 = 4_000_000;
+pub const OPERATOR_SCAN_PS_PER_ITEM: u64 = 7_000_000; // spec 9 final: 4 -> 7 us (3.72 ms measured for 1000)
 
 /// B1: the proof actually recorded exceeds the size of the encoded values by the trie nodes (up to ~10%). Margin of 1/8 above the estimate.
 pub const fn with_trie_margin(pov: u64) -> u64 {
@@ -50,9 +47,8 @@ pub trait WeightInfo {
     /// Early rejection before Argon2 (banned/duplicate/already renewed): reads and list scans only. Refunded as the actual weight.
     fn submit_admission_rejected_early() -> Weight;
     fn voluntary_exit() -> Weight;
-    fn ban_key() -> Weight;
-    /// `n` = the number of validators in the request.
-    fn dev_only_force_set_validators(n: u32) -> Weight;
+    /// The ban body (`Pallet::ban`) — not a call (`ban_key` was removed in spec 9); included in the weight of the Equivocation report in the Runtime.
+    fn ban() -> Weight;
     /// The `new_session` hook (runs inside `Session::on_initialize`; registered as mandatory).
     fn new_session() -> Weight;
     /// The per-block entropy accumulator.
@@ -65,6 +61,8 @@ pub trait WeightInfo {
     fn vouch_node() -> Weight;
     /// **D47** — withdraw the vouch for one node (including evicting it from every set).
     fn revoke_vouch() -> Weight;
+    /// spec 9 — `set_admission_cap_per_round` and `set_max_votes_per_operator` (read and write one value + event).
+    fn set_admission_param() -> Weight;
 }
 
 /// The actual implementation: the Argon2 cost from the `Config` parameters + the storage cost from `DbWeight` and the set sizes.
@@ -90,18 +88,21 @@ impl<T: crate::Config> ArgonMeteredWeight<T> {
     }
 
     /// `submit_admission_solution` (worst branch): reads {Banned, CurrentSession, Validators, MembershipExpiry,
-    /// NextRandomness, NodeOperator, Round, Events} and writes {MembershipExpiry|Round, Events, EventCount, topics}.
+    /// NextRandomness, NodeOperator ×2, Round, Events, MaxVotesPerOperator, SolutionAttempts} and writes
+    /// {MembershipExpiry|Round, SolutionAttempts, Events, EventCount, topics}.
     pub fn submit_ops() -> Ops {
         Ops {
-            reads: 10,
-            writes: 5,
+            reads: 13,
+            writes: 6,
         }
     }
-    /// Early rejection: {Banned, CurrentSession, Validators, MembershipExpiry, NextRandomness, NodeOperator, Round}.
+    /// Early refusal: {Banned, CurrentSession, Validators, MembershipExpiry, NextRandomness, NodeOperator ×2, Round,
+    /// MaxVotesPerOperator, SolutionAttempts} (spec 9: the attempt limit is checked before Argon2), + `System::Account` (spec 9, independent
+    /// review #6: an account with no references gets a success with an event, so the event writes are counted too).
     pub fn early_ops() -> Ops {
         Ops {
-            reads: 9,
-            writes: 0,
+            reads: 13,
+            writes: 3,
         }
     }
     /// `voluntary_exit`: read `Validators` (scan) + write `PendingVoluntaryExit`.
@@ -116,16 +117,8 @@ impl<T: crate::Config> ArgonMeteredWeight<T> {
     pub fn ban_ops() -> Ops {
         Ops {
             reads: 3,
-            writes: 6,
-        }
-    }
-    /// `dev_only_force_set_validators(n)`: `Validators` is read and written, and each member's validity is removed/written.
-    pub fn force_set_ops(n: u64) -> Ops {
-        // B1: two measured reads (`Validators` and `CurrentSession`).
-        Ops {
-            reads: 2,
-            writes: 1 + Self::v() + n,
-        }
+            writes: 7,
+        } // spec 9 (review #3): + `RenewalAttempts` removed with the seat
     }
     /// `new_session`: reads {Validators, Round, Pending, CurrentSession/EntropyCount, randomness ×3} + per member
     /// {exit, validity} + per candidate in every set {Banned, NextKeys}; writes {Validators, Pending, Round} +
@@ -133,12 +126,14 @@ impl<T: crate::Config> ArgonMeteredWeight<T> {
     pub fn new_session_ops() -> Ops {
         let v = Self::v();
         let c = Self::c();
-        let cap = T::AdmissionCapPerRound::get() as u64;
+        // spec 9: winners per rotation ≤ the round cap (all pools together) ≤ the hard limit; the old formula (cap per pool)
+        // is kept as a conservative upper bound.
+        let cap = T::AdmissionCapPerRoundLimit::get() as u64;
         Ops {
             // per staying validator also {BannedKeys, NodeOperator, ApprovedOperators} (operator counts, twice: before the
             // draw and for the cap check) and per candidate {ApprovedOperators}; per winner {NodeOperator, ApprovedOperators}
-            reads: 12 + 2 * v + 6 * v + 4 * c * POOLS + 2 * cap.saturating_add(POOLS * cap),
-            writes: 6 + 2 * v + 3 * v + 4 * cap.saturating_add(POOLS * cap) + c * POOLS,
+            reads: 13 + 2 * v + 6 * v + 4 * c * POOLS + 2 * cap.saturating_add(POOLS * cap),
+            writes: 6 + 3 * v + 3 * v + 4 * cap.saturating_add(POOLS * cap) + c * POOLS,
         }
     }
     /// `on_initialize`: reads {AuthorVrfRandomness, Accumulator, Last, Count} and writes {Accumulator, Count, Last}.
@@ -156,28 +151,31 @@ impl<T: crate::Config> ArgonMeteredWeight<T> {
     /// OperatorNodes, Round, Pending} and writes {NodeOperator, OperatorNodes, Validators, MembershipExpiry,
     /// PendingVoluntaryExit, Round, Pending}. Measured (n = 1, two evicted): 1003 reads / 11 writes.
     pub fn approve_operator_ops() -> Ops {
-        let evicted = T::MaxVotesPerOperator::get() as u64 + 1;
+        let evicted = T::MaxVotesPerOperatorLimit::get() as u64 + 1;
+        // spec 9: + read `MaxVotesPerOperator`.
         Ops {
-            reads: 1 + Self::v() + 4 * evicted,
-            writes: 1 + 7 * evicted,
-        }
+            reads: 2 + Self::v() + 4 * evicted,
+            writes: 1 + 8 * evicted,
+        } // spec 9: + `RenewalAttempts` per evicted
     }
     /// **D47** `revoke_operator_approval` (worst case: `MaxVotesPerOperator` bound nodes + its own seat): reads
     /// {ApprovedOperators, OperatorNodes} + per evicted {Validators, Round, Pending}; writes {ApprovedOperators,
     /// OperatorNodes} + per evicted a full eviction {NodeOperator, Validators, MembershipExpiry, PendingVoluntaryExit, Round,
     /// Pending}. Measured (n = 1): 5 reads / 11 writes.
     pub fn revoke_operator_ops() -> Ops {
-        let evicted = T::MaxVotesPerOperator::get() as u64 + 1;
+        let evicted = T::MaxVotesPerOperatorLimit::get() as u64 + 1;
+        // spec 9: + remove the operator's `SolutionAttempts`.
         Ops {
             reads: 2 + 3 * evicted,
-            writes: 2 + 6 * evicted,
-        }
+            writes: 3 + 7 * evicted,
+        } // spec 9: + `RenewalAttempts` per evicted
     }
     /// **D47** `vouch_node`: reads {ApprovedOperators, NodeOperator, Validators, OperatorNodes}, writes
     /// {OperatorNodes, NodeOperator}. (B1: was 3 reads; `Validators` was not counted.)
     pub fn vouch_node_ops() -> Ops {
+        // spec 9: + read `MaxVotesPerOperator`.
         Ops {
-            reads: 4,
+            reads: 5,
             writes: 2,
         }
     }
@@ -186,7 +184,14 @@ impl<T: crate::Config> ArgonMeteredWeight<T> {
     pub fn revoke_vouch_ops() -> Ops {
         Ops {
             reads: 5,
-            writes: 2 + 5,
+            writes: 2 + 6,
+        } // spec 9: + `RenewalAttempts`
+    }
+    /// spec 9 — set a value: read the old one + write it + the event (Events, EventCount).
+    pub fn set_admission_param_ops() -> Ops {
+        Ops {
+            reads: 2,
+            writes: 3,
         }
     }
 }
@@ -232,7 +237,7 @@ impl<T: crate::Config> WeightInfo for ArgonMeteredWeight<T> {
         .saturating_add(Self::db(Self::exit_ops()))
     }
 
-    fn ban_key() -> Weight {
+    fn ban() -> Weight {
         let scans = (Self::v() + Self::c() * POOLS).saturating_mul(SCAN_PS_PER_ITEM);
         Weight::from_parts(
             // B1 2026-09-21: 100 release samples at maximum occupancy reached
@@ -246,17 +251,6 @@ impl<T: crate::Config> WeightInfo for ArgonMeteredWeight<T> {
             ),
         )
         .saturating_add(Self::db(Self::ban_ops()))
-    }
-
-    fn dev_only_force_set_validators(n: u32) -> Weight {
-        let n = n as u64;
-        Weight::from_parts(
-            50_000_000u64.saturating_add((Self::v() + n).saturating_mul(FORCE_SET_PS_PER_ITEM)),
-            Self::validators_pov()
-                .saturating_mul(2)
-                .saturating_add((Self::v() + n) * POV_PER_KEY),
-        )
-        .saturating_add(Self::db(Self::force_set_ops(n)))
     }
 
     fn new_session() -> Weight {
@@ -274,7 +268,9 @@ impl<T: crate::Config> WeightInfo for ArgonMeteredWeight<T> {
             Self::validators_pov()
                 .saturating_add(POOLS * Self::pool_pov())
                 .saturating_add(
-                    (8 * v + 4 * c * POOLS + 2 * POOLS * T::AdmissionCapPerRound::get() as u64)
+                    (8 * v
+                        + 4 * c * POOLS
+                        + 2 * POOLS * T::AdmissionCapPerRoundLimit::get() as u64)
                         * POV_PER_KEY,
                 ),
         )
@@ -283,12 +279,13 @@ impl<T: crate::Config> WeightInfo for ArgonMeteredWeight<T> {
 
     fn on_initialize() -> Weight {
         // B1: 12.4 us WASM median (30 us >= 2×); recorded proof 360 bytes (256 were declared).
-        Weight::from_parts(30_000_000, 400).saturating_add(Self::db(Self::on_initialize_ops()))
+        // spec 9 final (2026-10-16): 23.5 us measured => 55 us.
+        Weight::from_parts(55_000_000, 400).saturating_add(Self::db(Self::on_initialize_ops()))
     }
 
     // D47 — operator caps for identity-duplication resistance. B1 (2026-10-15): measured in WASM in the worst case (1000 members, full pools).
     fn approve_operator() -> Weight {
-        let n = T::MaxVotesPerOperator::get() as u64;
+        let n = T::MaxVotesPerOperatorLimit::get() as u64;
         let scans = (Self::v() + n).saturating_mul(OPERATOR_SCAN_PS_PER_ITEM);
         Weight::from_parts(
             30_000_000u64.saturating_add(scans),
@@ -298,7 +295,7 @@ impl<T: crate::Config> WeightInfo for ArgonMeteredWeight<T> {
     }
 
     fn revoke_operator_approval() -> Weight {
-        let evicted = T::MaxVotesPerOperator::get() as u64 + 1;
+        let evicted = T::MaxVotesPerOperatorLimit::get() as u64 + 1;
         // per evicted: scan `Validators` (liveness guard + removal) and every pool — like `revoke_vouch` per evicted.
         let scans = evicted
             .saturating_mul((Self::v() + Self::c() * POOLS).saturating_mul(SCAN_PS_PER_ITEM));
@@ -333,5 +330,11 @@ impl<T: crate::Config> WeightInfo for ArgonMeteredWeight<T> {
             ),
         )
         .saturating_add(Self::db(Self::revoke_vouch_ops()))
+    }
+
+    fn set_admission_param() -> Weight {
+        // spec 9: check the limit, then write one u32 value and an event.
+        Weight::from_parts(30_000_000, with_trie_margin(3 * POV_PER_KEY))
+            .saturating_add(Self::db(Self::set_admission_param_ops()))
     }
 }

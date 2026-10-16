@@ -63,10 +63,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        /// The overarching event type.
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// Any call that can be dispatched through this pallet (including
         /// `system.set_code`) — actually executed with origin = `Root`
         /// **only after** successfully passing `ApprovedOrigin` below, never before.

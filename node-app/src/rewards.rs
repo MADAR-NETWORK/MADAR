@@ -24,6 +24,8 @@ pub const LINK_POLL_EVERY: u64 = 30;
 pub const CODE_TTL: u64 = 30 * 60;
 /// How often the app asks the service whether "My earnings" is open.
 pub const STATE_EVERY: u64 = 30 * 60;
+/// The node campaign page (free .madar name after 7 days); the app only ever opens this fixed address for it.
+pub const CAMPAIGN_URL: &str = "https://madar-network.com/nodes/#claim";
 
 pub fn hello_text(key: &str, ts: u64) -> String {
     format!("MADAR Node: hello {key} {ts}")

@@ -25,6 +25,14 @@
 //! (`<chain>:<tx hash>`) from the lock's network, and emits `SaleCompletedV2` with all of it; so anyone can match every completed sale with
 //! the payment chain. One reference cannot complete two sales. Since spec 9: the two old calls `lock_sale` (6) and `complete_sale` (7)
 //! are removed (they were disabled since spec 8); their indices are never reused, and storage is unchanged. The safe sale is v2 only.
+//!
+//! **v2 messages (spec 9):** every v2 message ends with two lines:
+//! `network: 0x<hash of block 0>` and `valid until: <UTC milliseconds>`, so the signature is not valid on another network or after its deadline.
+//! New calls: `register_v2` (11), `lock_sale_v3` (12), `cancel_offer_v2` (13), `transfer` (14, with two signatures),
+//! `reassign` (15, the committee for a proven dispute), `set_legacy_accepted_until` (16, the committee). The old (v1) calls are accepted for 72 hours
+//! only after the spec 9 upgrade (`LegacyAcceptedUntil`, set once by the migration) and are then refused on their own; the committee can shorten or
+//! extend it by up to 7 days per decision. The old `lock_sale_v2` accepts only the five original networks and a fully valid receiving address. The buyer's acceptance in v3 does not go past the end of the lock, so it cannot be
+//! used to re-lock after the lock has lapsed. `on_idle` cleans up expired locks and v1 locks with a fixed limit per block.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
@@ -34,7 +42,7 @@ extern crate alloc;
 pub mod weights;
 
 use alloc::vec::Vec;
-pub use madar_stamp::{verify_proof, Wallet, WalletProof};
+pub use madar_stamp::{network_tail, verify_proof, Wallet, WalletProof};
 pub use pallet::*;
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
@@ -73,9 +81,13 @@ pub struct SaleLock {
 
 /// Maximum length of the payment reference `<chain>:<tx hash>`.
 pub const MAX_PAYMENT_REF: u32 = 160;
-/// Number of known payment networks (the same order as the registrar service's rail list):
-/// 0 solana_usdc, 1 solana_usdt, 2 base_usdc, 3 arbitrum_usdc, 4 arbitrum_usdt.
-pub const RAILS: u8 = 5;
+/// The number of known payment networks (same order as `Rail::all()` in the off-chain service; only appended at the end, an old index never changes):
+/// 0 solana_usdc, 1 solana_usdt, 2 base_usdc, 3 arbitrum_usdc, 4 arbitrum_usdt,
+/// (spec 9) 5 ethereum_usdc, 6 ethereum_usdt, 7 optimism_usdc, 8 optimism_usdt, 9 polygon_usdc, 10 polygon_usdt,
+/// 11 bsc_usdc, 12 bsc_usdt.
+pub const RAILS: u8 = 13;
+/// (spec 9, independent review #2) the five original networks (0..=4) — the only ones accepted in the old `lock_sale_v2` (v1 message).
+pub const ORIGINAL_RAILS: u8 = 5;
 /// Micro units per cent (stablecoins with 6 decimals).
 pub const MICRO_PER_CENT: u64 = 10_000;
 /// The exact amount = the signed price + a small increment that identifies the payment (less than 0.10 dollars).
@@ -87,7 +99,7 @@ pub type PaymentRef =
 /// The payment terms recorded with a v2 lock — separate storage keyed by the name, so no migration of v1 locks existing at upgrade time.
 #[derive(Encode, Decode, Clone, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen)]
 pub struct SaleTerms {
-    /// 0 solana_usdc, 1 solana_usdt, 2 base_usdc, 3 arbitrum_usdc, 4 arbitrum_usdt.
+    /// The network number as in [`RAILS`].
     pub rail: u8,
     /// The exact amount the buyer pays the seller (micro units, 6 decimals).
     pub pay_amount: u64,
@@ -99,6 +111,10 @@ pub fn rail_chain(rail: u8) -> Option<&'static [u8]> {
         0 | 1 => Some(b"solana"),
         2 => Some(b"base"),
         3 | 4 => Some(b"arbitrum"),
+        5 | 6 => Some(b"ethereum"),
+        7 | 8 => Some(b"optimism"),
+        9 | 10 => Some(b"polygon"),
+        11 | 12 => Some(b"bsc"),
         _ => None,
     }
 }
@@ -108,8 +124,21 @@ pub fn rail_fits_pay_to(rail: u8, pay_to: &[u8]) -> bool {
     let evm = pay_to.starts_with(b"0x");
     match rail {
         0 | 1 => !evm,
-        2..=4 => evm,
+        2..=12 => evm,
         _ => false,
+    }
+}
+
+/// (spec 9) A receiving address fully valid for its network: EVM = `0x` + 40 hex digits, and Solana = a base58 key of 32 bytes.
+/// `lock_sale_v3` requires it, so the address cannot carry other text inside the signed message.
+pub fn valid_pay_to(rail: u8, pay_to: &[u8]) -> bool {
+    if !rail_fits_pay_to(rail, pay_to) {
+        return false;
+    }
+    if rail <= 1 {
+        (32..=44).contains(&pay_to.len()) && base58_decode(pay_to).is_some_and(|b| b.len() == 32)
+    } else {
+        pay_to.len() == 42 && pay_to[2..].iter().all(|c| c.is_ascii_hexdigit())
     }
 }
 
@@ -122,6 +151,64 @@ pub fn amount_fits_price(pay_amount: u64, price_cents: u64) -> bool {
 }
 
 const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/// base58 (the Bitcoin/Solana alphabet) as Solana wallets display it.
+pub fn base58_encode(bytes: &[u8]) -> Vec<u8> {
+    let zeros = bytes.iter().take_while(|b| **b == 0).count();
+    // base-58 digits, least significant first
+    let mut digits: Vec<u8> = Vec::with_capacity(bytes.len() * 138 / 100 + 1);
+    for &b in &bytes[zeros..] {
+        let mut carry = b as u32;
+        for d in digits.iter_mut() {
+            carry += (*d as u32) << 8;
+            *d = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+    let mut out = Vec::with_capacity(zeros + digits.len());
+    out.resize(zeros, b'1');
+    out.extend(digits.iter().rev().map(|d| BASE58[*d as usize]));
+    out
+}
+
+/// The inverse of [`base58_encode`]; `None` for a character outside the alphabet.
+pub fn base58_decode(s: &[u8]) -> Option<Vec<u8>> {
+    let zeros = s.iter().take_while(|c| **c == b'1').count();
+    // bytes, least significant first
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
+    for &c in &s[zeros..] {
+        let mut carry = BASE58.iter().position(|x| *x == c)? as u32;
+        for b in bytes.iter_mut() {
+            carry += (*b as u32) * 58;
+            *b = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            bytes.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    let mut out = Vec::with_capacity(zeros + bytes.len());
+    out.resize(zeros, 0);
+    out.extend(bytes.iter().rev());
+    Some(out)
+}
+
+/// The wallet as its owner sees it: EVM = `0x` + 40 lowercase hex digits, and Solana = the key in base58.
+pub fn wallet_text(w: &Wallet) -> Vec<u8> {
+    match w {
+        Wallet::Evm(a) => {
+            let mut m = b"0x".to_vec();
+            madar_stamp::hex_into(&mut m, a);
+            m
+        }
+        Wallet::Solana(p) => base58_encode(p),
+    }
+}
 
 /// A valid payment reference for the lock's network? `base:0x<64 lowercase hex>`, `arbitrum:0x<64 lowercase hex>`, `solana:<base58 signature, 32 to 88 characters>`.
 /// Lowercase is mandatory for EVM so the same reference cannot repeat in another form.
@@ -212,6 +299,111 @@ pub fn cancel_message(name: &[u8], nonce: u32) -> Vec<u8> {
     m
 }
 
+// ---------------------------------------------------------------- v2 messages (spec 9)
+// Every v2 message = the v1 text (with what is needed) + `network_tail`: "\nnetwork: 0x<64 hex>\nvalid until: <ms>". No off-chain text
+// (the off-chain service) writes this tail, and each kind starts with a different prefix, so a message of one kind is not valid for another.
+
+/// (v2) Registration: bound to the network and to a deadline (up to 7 days, covering the order's payment window).
+pub fn register_message_v2(name: &[u8], network: &[u8], valid_until: u64) -> Vec<u8> {
+    let mut m = register_message(name);
+    network_tail(&mut m, network, valid_until);
+    m
+}
+
+/// (v2) Seller's offer: its deadline is `offer_until` itself.
+pub fn sale_message_v2(
+    name: &[u8],
+    nonce: u32,
+    price_cents: u64,
+    pay_to: &[u8],
+    offer_until: u64,
+    network: &[u8],
+) -> Vec<u8> {
+    let mut m = Vec::with_capacity(320);
+    m.extend_from_slice(b"MADAR Names: I offer ");
+    m.extend_from_slice(name);
+    m.extend_from_slice(b".madar for ");
+    push_usd(&mut m, price_cents);
+    m.extend_from_slice(b" USD, paid to ");
+    m.extend_from_slice(pay_to);
+    m.extend_from_slice(b", under the MADAR Names sale terms v1. Offer ");
+    push_u64(&mut m, nonce as u64);
+    m.push(b'.');
+    network_tail(&mut m, network, offer_until);
+    m
+}
+
+/// (v2) Buyer's acceptance: the price, the seller's receiving wallet and the offer number, with a short deadline (`accept_until` does not go past the end of the lock).
+pub fn buy_message_v2(
+    name: &[u8],
+    nonce: u32,
+    price_cents: u64,
+    pay_to: &[u8],
+    accept_until: u64,
+    network: &[u8],
+) -> Vec<u8> {
+    let mut m = Vec::with_capacity(320);
+    m.extend_from_slice(b"MADAR Names: I buy ");
+    m.extend_from_slice(name);
+    m.extend_from_slice(b".madar for ");
+    push_usd(&mut m, price_cents);
+    m.extend_from_slice(b" USD plus the MADAR fee, paid to ");
+    m.extend_from_slice(pay_to);
+    m.extend_from_slice(b", under the MADAR Names sale terms v1. Offer ");
+    push_u64(&mut m, nonce as u64);
+    m.extend_from_slice(b". The name comes to this wallet.");
+    network_tail(&mut m, network, accept_until);
+    m
+}
+
+/// (v2) The seller cancels its offers.
+pub fn cancel_message_v2(name: &[u8], nonce: u32, network: &[u8], valid_until: u64) -> Vec<u8> {
+    let mut m = cancel_message(name, nonce);
+    network_tail(&mut m, network, valid_until);
+    m
+}
+
+/// (spec 9) The owner transfers the name to a specific wallet (no sale and no money).
+pub fn transfer_message(
+    name: &[u8],
+    nonce: u32,
+    to: &Wallet,
+    network: &[u8],
+    valid_until: u64,
+) -> Vec<u8> {
+    let mut m = Vec::with_capacity(260);
+    m.extend_from_slice(b"MADAR Names: transfer ");
+    m.extend_from_slice(name);
+    m.extend_from_slice(b".madar to ");
+    m.extend_from_slice(&wallet_text(to));
+    m.extend_from_slice(b". No funds move. Nonce ");
+    push_u64(&mut m, nonce as u64);
+    m.push(b'.');
+    network_tail(&mut m, network, valid_until);
+    m
+}
+
+/// (spec 9) The new wallet accepts the name.
+pub fn accept_message(name: &[u8], nonce: u32, network: &[u8], valid_until: u64) -> Vec<u8> {
+    let mut m = Vec::with_capacity(200);
+    m.extend_from_slice(b"MADAR Names: I accept ");
+    m.extend_from_slice(name);
+    m.extend_from_slice(b".madar into this wallet. No funds move. Nonce ");
+    push_u64(&mut m, nonce as u64);
+    m.push(b'.');
+    network_tail(&mut m, network, valid_until);
+    m
+}
+
+/// The maximum deadline for signing a v2 registration: 7 days (a name order waits for payment up to 2 hours + 72 hours for a late payment).
+pub const MAX_REGISTER_PROOF_MS: u64 = 7 * 24 * 3600 * 1000;
+/// The maximum deadline for signing an offer cancellation or a transfer: one day.
+pub const MAX_PROOF_MS: u64 = 24 * 3600 * 1000;
+/// The maximum duration of a v2 sale offer at lock time: 92 days (the off-chain service offers up to 90).
+pub const MAX_OFFER_MS: u64 = 92 * 24 * 3600 * 1000;
+/// The maximum number of locks `on_idle` checks per block.
+pub const MAX_CLEANUP: u32 = 8;
+
 /// Is the name valid? `a-z`, `0-9` and `-`, 3 to 32 characters, not starting or ending with a hyphen.
 pub fn valid_name(name: &[u8]) -> bool {
     (3..=MAX_NAME as usize).contains(&name.len())
@@ -235,6 +427,7 @@ pub fn register_message(name: &[u8]) -> Vec<u8> {
 pub mod pallet {
     use super::*;
     use crate::weights::WeightInfo as _;
+    use frame_support::sp_runtime::traits::Zero;
     use frame_support::{pallet_prelude::*, traits::UnixTime};
     use frame_system::pallet_prelude::*;
 
@@ -253,7 +446,12 @@ pub mod pallet {
         type WeightInfo: crate::weights::WeightInfo;
     }
 
+    /// 1 (spec 9) = v2 messages, the v1 deadline (`LegacyAcceptedUntil`) and the cleanup cursor. No change to the shape of any old storage;
+    /// `on_runtime_upgrade` writes the number and sets the v1 deadline to the upgrade time + 72 hours, once.
+    pub const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     #[pallet::storage]
@@ -284,6 +482,17 @@ pub mod pallet {
     pub type Registrars<T: Config> =
         StorageValue<_, BoundedVec<T::AccountId, T::MaxRegistrars>, ValueQuery>;
 
+    /// (spec 9, independent review #2) v1 messages (no network and no deadline) in `register`, `cancel_offer` and `lock_sale_v2` are accepted only
+    /// before this time (UTC milliseconds). The spec 9 migration sets it once to the upgrade time + 72 hours, so v1 stops on its own without a
+    /// committee decision. A new chain (Genesis) starts at 0: v1 is refused from the start. The 2-of-3 committee can shorten it, or extend it by up to
+    /// 7 days per decision (`set_legacy_accepted_until`).
+    #[pallet::storage]
+    pub type LegacyAcceptedUntil<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+    /// (spec 9) The key of the last lock checked by `on_idle` (it continues from there in the next block). Empty = from the start.
+    #[pallet::storage]
+    pub type CleanupCursor<T: Config> = StorageValue<_, BoundedVec<u8, ConstU32<128>>, OptionQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -306,14 +515,14 @@ pub mod pallet {
             owner: Wallet,
             reason: BoundedVec<u8, ConstU32<256>>,
         },
-        /// The name was locked for a buyer until `until`, waiting for their payment.
+        /// DEPRECATED (not emitted since spec 9: the v1 `lock_sale` call was removed). Kept so the indices of the events after it do not change.
         SaleLocked {
             name: NameOf,
             buyer: Wallet,
             price_cents: u64,
             until: u64,
         },
-        /// The name moved to the buyer after the payment arrived (the term is unchanged).
+        /// DEPRECATED (not emitted since spec 9: the v1 `complete_sale` call was removed). Kept so the indices of the events after it do not change.
         Sold {
             name: NameOf,
             from: Wallet,
@@ -351,6 +560,23 @@ pub mod pallet {
             amount: u64,
             payment_ref: PaymentRef,
         },
+        /// (spec 9) The owner transferred the name to another wallet with its signature and that wallet's acceptance (the term and registration date unchanged).
+        Transferred {
+            name: NameOf,
+            from: Wallet,
+            to: Wallet,
+        },
+        /// (spec 9) The 2-of-3 committee returned the name to its rightful owner after a proven dispute; the reason is public (the term unchanged).
+        Reassigned {
+            name: NameOf,
+            from: Wallet,
+            to: Wallet,
+            reason: BoundedVec<u8, ConstU32<256>>,
+        },
+        /// (spec 9) The v1 message deadline was set (by the migration or by a committee decision).
+        LegacyAcceptedUntilSet {
+            until: u64,
+        },
     }
 
     #[pallet::error]
@@ -387,15 +613,54 @@ pub mod pallet {
         BadPaymentRef,
         /// The payment reference was used for an earlier sale.
         PaymentRefUsed,
-        /// A v2 lock completes only with the payment reference (`complete_sale_v2`).
+        /// DEPRECATED (unused since spec 9: the old completion was removed). Kept so the indices of the errors after it do not change.
         PaymentRefRequired,
         /// `complete_sale_v2` needs a v2 lock that holds the amount and the network.
         NotV2Lock,
         /// (spec 8) Re-registering a name for the same owner cannot shorten its paid term.
         ExpiryShortened,
-        /// (spec 8) The old `lock_sale`/`complete_sale` were disabled, and removed in spec 9. The error stays so the indices
-        /// of the errors after it do not change.
+        /// DEPRECATED (unused since spec 9): the old `lock_sale`/`complete_sale` were stopped in spec 8 and removed in spec 9.
+        /// The error is kept so the indices of the errors after it do not change.
         V1SaleRemoved,
+        /// (spec 9) The signature deadline has passed, or is further away than allowed for this kind of message.
+        ProofExpired,
+        /// (spec 9) The v1 message deadline has passed (72 hours after the upgrade, or by a committee decision): use the v2 calls.
+        LegacyMessagesOff,
+        /// (spec 9) The new wallet is the current owner itself.
+        SameOwner,
+        /// (spec 9) The seller's receiving address is not a valid address for the payment network.
+        BadPayTo,
+        /// (spec 9) An extension of more than 7 days past the current deadline in one decision.
+        LegacyExtensionTooLong,
+    }
+
+    #[pallet::hooks]
+    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        fn on_runtime_upgrade() -> Weight {
+            // spec 9: version 0 -> 1. No stored layout changed. Once: v1 messages are accepted until upgrade time + 72 h
+            // (independent review #2), then refused with no further committee action.
+            if Pallet::<T>::on_chain_storage_version() < STORAGE_VERSION {
+                let until = (T::Time::now().as_millis() as u64)
+                    .saturating_add(madar_stamp::LEGACY_SUNSET_MS);
+                LegacyAcceptedUntil::<T>::put(until);
+                STORAGE_VERSION.put::<Pallet<T>>();
+                Self::deposit_event(Event::LegacyAcceptedUntilSet { until });
+                T::DbWeight::get().reads_writes(2, 4)
+            } else {
+                T::DbWeight::get().reads(1)
+            }
+        }
+
+        /// Bounded cleanup: up to `MAX_CLEANUP` locks per block, removing expired ones and v1 locks (with no payment terms). It runs only if the
+        /// remaining block weight covers a full worst case.
+        fn on_idle(_n: BlockNumberFor<T>, remaining: Weight) -> Weight {
+            let w = T::WeightInfo::cleanup();
+            if remaining.any_lt(w) {
+                return Weight::zero();
+            }
+            Self::cleanup(MAX_CLEANUP);
+            w
+        }
     }
 
     #[pallet::call]
@@ -411,47 +676,11 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
-            ensure!(valid_name(&name), Error::<T>::InvalidName);
-            ensure!(
-                !Reserved::<T>::contains_key(&name),
-                Error::<T>::NameReserved
-            );
-            let now = T::Time::now().as_millis() as u64;
-            ensure!(
-                expires > now && expires <= now.saturating_add(T::MaxTermMs::get()),
-                Error::<T>::BadExpiry
-            );
+            Self::ensure_legacy_open()?;
+            let now = Self::checks_before_register(&name, expires)?;
             let owner =
                 verify_proof(&proof, &register_message(&name)).ok_or(Error::<T>::InvalidProof)?;
-            let registered = match Names::<T>::get(&name) {
-                // Same owner: extension only. The registrar cannot shorten a paid term and then take the name after it ends (security 2026-10-12).
-                Some(r) if r.owner == owner => {
-                    ensure!(expires >= r.expires, Error::<T>::ExpiryShortened);
-                    r.registered
-                }
-                Some(r) if r.expires.saturating_add(GRACE_MS) > now => {
-                    return Err(Error::<T>::NameTaken.into())
-                }
-                _ => {
-                    Self::new_owner(&name);
-                    now
-                }
-            };
-            Names::<T>::insert(
-                &name,
-                NameRecord {
-                    owner: owner.clone(),
-                    registered,
-                    expires,
-                    registrar: who,
-                },
-            );
-            Self::deposit_event(Event::Registered {
-                name,
-                owner,
-                expires,
-            });
-            Ok(())
+            Self::do_register(who, name, owner, expires, now)
         }
 
         /// Extends the term of a registered name (the owner does not change).
@@ -556,18 +785,8 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
-            let now = T::Time::now().as_millis() as u64;
-            let r = Names::<T>::get(&name).ok_or(Error::<T>::NotRegistered)?;
-            ensure!(!Self::locked(&name, now), Error::<T>::SaleLocked);
-            let nonce = SaleNonce::<T>::get(&name);
-            let owner = verify_proof(&owner_proof, &cancel_message(&name, nonce))
-                .ok_or(Error::<T>::InvalidProof)?;
-            ensure!(owner == r.owner, Error::<T>::BadOffer);
-            SaleNonce::<T>::insert(&name, nonce.wrapping_add(1));
-            Locks::<T>::remove(&name);
-            LockTerms::<T>::remove(&name);
-            Self::deposit_event(Event::OfferCancelled { name });
-            Ok(())
+            Self::ensure_legacy_open()?;
+            Self::do_cancel(name, &owner_proof, cancel_message)
         }
 
         /// (spec 8) Like `lock_sale` with the exact amount the buyer will pay the seller (`pay_amount`, micro units with 6 decimals)
@@ -590,10 +809,14 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
+            Self::ensure_legacy_open()?;
+            // spec 9 (independent review #2): the legacy call keeps the 5 original rails only, and the same full pay_to
+            // check as `lock_sale_v3` (the v1 texts were never meant for the new chains).
             ensure!(
-                rail < RAILS && rail_fits_pay_to(rail, &pay_to),
+                rail < ORIGINAL_RAILS && rail_fits_pay_to(rail, &pay_to),
                 Error::<T>::BadRail
             );
+            ensure!(valid_pay_to(rail, &pay_to), Error::<T>::BadPayTo);
             ensure!(
                 amount_fits_price(pay_amount, price_cents),
                 Error::<T>::BadAmount
@@ -669,9 +892,230 @@ pub mod pallet {
             });
             Ok(())
         }
+
+        /// (spec 9) Like `register` with a v2 message: bound to this network and valid until `valid_until` (up to 7 days from now).
+        #[pallet::call_index(11)]
+        #[pallet::weight(T::WeightInfo::register_v2())]
+        pub fn register_v2(
+            origin: OriginFor<T>,
+            name: NameOf,
+            proof: WalletProof,
+            expires: u64,
+            valid_until: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
+            let now = Self::checks_before_register(&name, expires)?;
+            Self::check_window(now, valid_until, MAX_REGISTER_PROOF_MS)?;
+            let msg = register_message_v2(&name, &Self::network(), valid_until);
+            let owner = verify_proof(&proof, &msg).ok_or(Error::<T>::InvalidProof)?;
+            Self::do_register(who, name, owner, expires, now)
+        }
+
+        /// (spec 9) A sale lock with v2 messages. On top of the `lock_sale_v2` checks: the offer is bound to the network and lasts up to 92 days, the receiving address
+        /// is fully valid, and the buyer's acceptance states the receiving address and its deadline `accept_until` between now and the end of the lock. So after the lock lapses
+        /// the acceptance has expired too, and nobody can re-lock with the same signature.
+        #[pallet::call_index(12)]
+        #[pallet::weight(T::WeightInfo::sale_v3())]
+        #[allow(clippy::too_many_arguments)]
+        pub fn lock_sale_v3(
+            origin: OriginFor<T>,
+            name: NameOf,
+            seller_proof: WalletProof,
+            price_cents: u64,
+            pay_to: BoundedVec<u8, ConstU32<MAX_PAY_TO>>,
+            offer_until: u64,
+            buyer_proof: WalletProof,
+            accept_until: u64,
+            lock_until: u64,
+            pay_amount: u64,
+            rail: u8,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
+            ensure!(
+                rail < RAILS && rail_fits_pay_to(rail, &pay_to),
+                Error::<T>::BadRail
+            );
+            ensure!(valid_pay_to(rail, &pay_to), Error::<T>::BadPayTo);
+            ensure!(price_cents > 0, Error::<T>::BadPrice);
+            ensure!(
+                amount_fits_price(pay_amount, price_cents),
+                Error::<T>::BadAmount
+            );
+            let now = T::Time::now().as_millis() as u64;
+            let r = Names::<T>::get(&name).ok_or(Error::<T>::NotRegistered)?;
+            ensure!(r.expires > now, Error::<T>::NotRegistered);
+            ensure!(
+                offer_until >= now && offer_until <= now.saturating_add(MAX_OFFER_MS),
+                Error::<T>::BadOffer
+            );
+            ensure!(
+                lock_until > now && lock_until <= now.saturating_add(MAX_LOCK_MS),
+                Error::<T>::BadLock
+            );
+            Self::check_window(now, accept_until, MAX_LOCK_MS)?;
+            ensure!(accept_until <= lock_until, Error::<T>::BadLock);
+            ensure!(!Self::locked(&name, now), Error::<T>::SaleLocked);
+            let nonce = SaleNonce::<T>::get(&name);
+            let net = Self::network();
+            let seller = verify_proof(
+                &seller_proof,
+                &sale_message_v2(&name, nonce, price_cents, &pay_to, offer_until, &net),
+            )
+            .ok_or(Error::<T>::InvalidProof)?;
+            ensure!(seller == r.owner, Error::<T>::BadOffer);
+            let buyer = verify_proof(
+                &buyer_proof,
+                &buy_message_v2(&name, nonce, price_cents, &pay_to, accept_until, &net),
+            )
+            .ok_or(Error::<T>::InvalidProof)?;
+            ensure!(buyer != r.owner, Error::<T>::BadOffer);
+            Locks::<T>::insert(
+                &name,
+                SaleLock {
+                    buyer: buyer.clone(),
+                    until: lock_until,
+                    price_cents,
+                    pay_to: pay_to.clone(),
+                },
+            );
+            LockTerms::<T>::insert(&name, SaleTerms { rail, pay_amount });
+            Self::deposit_event(Event::SaleLockedV2 {
+                name,
+                buyer,
+                price_cents,
+                until: lock_until,
+                pay_to,
+                rail,
+                amount: pay_amount,
+            });
+            Ok(())
+        }
+
+        /// (spec 9) Like `cancel_offer` with a v2 message (the network + a deadline of up to one day).
+        #[pallet::call_index(13)]
+        #[pallet::weight(T::WeightInfo::cancel_v2())]
+        pub fn cancel_offer_v2(
+            origin: OriginFor<T>,
+            name: NameOf,
+            owner_proof: WalletProof,
+            valid_until: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
+            Self::check_window(T::Time::now().as_millis() as u64, valid_until, MAX_PROOF_MS)?;
+            let net = Self::network();
+            Self::do_cancel(name, &owner_proof, |n, nonce| {
+                cancel_message_v2(n, nonce, &net, valid_until)
+            })
+        }
+
+        /// (spec 9) Transfer of a name without a sale: the owner signs the transfer message to the specific new wallet, and the new wallet signs the acceptance.
+        /// Both are bound to the network, to the name's number (`SaleNonce`) and to a deadline of up to one day. No transfer during an active sale lock or after the
+        /// term has ended. The term and registration date stay unchanged, and all old offers and locks are dropped.
+        #[pallet::call_index(14)]
+        #[pallet::weight(T::WeightInfo::transfer())]
+        pub fn transfer(
+            origin: OriginFor<T>,
+            name: NameOf,
+            owner_proof: WalletProof,
+            new_owner_proof: WalletProof,
+            valid_until: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
+            let now = T::Time::now().as_millis() as u64;
+            Self::check_window(now, valid_until, MAX_PROOF_MS)?;
+            let r = Names::<T>::get(&name).ok_or(Error::<T>::NotRegistered)?;
+            ensure!(r.expires > now, Error::<T>::NotRegistered);
+            ensure!(!Self::locked(&name, now), Error::<T>::SaleLocked);
+            let nonce = SaleNonce::<T>::get(&name);
+            let net = Self::network();
+            let to = verify_proof(
+                &new_owner_proof,
+                &accept_message(&name, nonce, &net, valid_until),
+            )
+            .ok_or(Error::<T>::InvalidProof)?;
+            ensure!(to != r.owner, Error::<T>::SameOwner);
+            let from = verify_proof(
+                &owner_proof,
+                &transfer_message(&name, nonce, &to, &net, valid_until),
+            )
+            .ok_or(Error::<T>::InvalidProof)?;
+            ensure!(from == r.owner, Error::<T>::BadOffer);
+            Names::<T>::insert(
+                &name,
+                NameRecord {
+                    owner: to.clone(),
+                    registered: r.registered,
+                    expires: r.expires,
+                    registrar: who,
+                },
+            );
+            Self::new_owner(&name);
+            Self::deposit_event(Event::Transferred { name, from, to });
+            Ok(())
+        }
+
+        /// (spec 9) 2-of-3 committee only: return a name to its rightful owner after a proven dispute. The reason is a mandatory public text, and the term and
+        /// registration date stay unchanged (no extension or shortening), and all offers and locks are dropped. It does not touch a name released after the grace period.
+        #[pallet::call_index(15)]
+        #[pallet::weight(T::WeightInfo::reassign())]
+        pub fn reassign(
+            origin: OriginFor<T>,
+            name: NameOf,
+            new_owner: Wallet,
+            reason: BoundedVec<u8, ConstU32<256>>,
+        ) -> DispatchResult {
+            T::AdminOrigin::ensure_origin(origin)?;
+            ensure!(!reason.is_empty(), Error::<T>::ReasonRequired);
+            let now = T::Time::now().as_millis() as u64;
+            let mut r = Names::<T>::get(&name).ok_or(Error::<T>::NotRegistered)?;
+            ensure!(
+                r.expires.saturating_add(GRACE_MS) > now,
+                Error::<T>::NotRegistered
+            );
+            ensure!(r.owner != new_owner, Error::<T>::SameOwner);
+            let from = core::mem::replace(&mut r.owner, new_owner.clone());
+            Names::<T>::insert(&name, r);
+            Self::new_owner(&name);
+            Self::deposit_event(Event::Reassigned {
+                name,
+                from,
+                to: new_owner,
+                reason,
+            });
+            Ok(())
+        }
+
+        /// (spec 9) 2-of-3 committee only: the v1 message deadline. Shortening without limit (0 = stop immediately), or extension by up to 7 days past the
+        /// current deadline per decision — so v1 cannot be opened without end by a single decision.
+        #[pallet::call_index(16)]
+        #[pallet::weight(T::WeightInfo::admin())]
+        pub fn set_legacy_accepted_until(origin: OriginFor<T>, until: u64) -> DispatchResult {
+            T::AdminOrigin::ensure_origin(origin)?;
+            ensure!(
+                madar_stamp::legacy_change_allowed(LegacyAcceptedUntil::<T>::get(), until),
+                Error::<T>::LegacyExtensionTooLong
+            );
+            LegacyAcceptedUntil::<T>::put(until);
+            Self::deposit_event(Event::LegacyAcceptedUntilSet { until });
+            Ok(())
+        }
     }
 
     impl<T: Config> Pallet<T> {
+        /// (spec 9) Are v1 messages accepted now? (Before `LegacyAcceptedUntil`.)
+        pub fn ensure_legacy_open() -> DispatchResult {
+            let now = T::Time::now().as_millis() as u64;
+            ensure!(
+                now < LegacyAcceptedUntil::<T>::get(),
+                Error::<T>::LegacyMessagesOff
+            );
+            Ok(())
+        }
+
         pub fn is_registrar(who: &T::AccountId) -> bool {
             Registrars::<T>::get().contains(who)
         }
@@ -679,6 +1123,122 @@ pub mod pallet {
         /// Is the name locked for a buyer right now? An expired lock has no effect.
         pub fn locked(name: &NameOf, now: u64) -> bool {
             Locks::<T>::get(name).is_some_and(|l| l.until >= now)
+        }
+
+        /// The identity of this network in v2 messages: the hash of block 0 (`frame_system` always keeps it, and `CheckGenesis` checks it in every transaction).
+        pub fn network() -> Vec<u8> {
+            frame_system::Pallet::<T>::block_hash(BlockNumberFor::<T>::zero())
+                .as_ref()
+                .to_vec()
+        }
+
+        /// v2 signature deadline: not yet passed, and not more than `max` from now.
+        fn check_window(now: u64, valid_until: u64, max: u64) -> DispatchResult {
+            ensure!(
+                valid_until >= now && valid_until <= now.saturating_add(max),
+                Error::<T>::ProofExpired
+            );
+            Ok(())
+        }
+
+        /// Registration checks before the signature (v1 and v2): a valid name that is not reserved, and a future term within the limit. Returns the current time.
+        fn checks_before_register(name: &NameOf, expires: u64) -> Result<u64, DispatchError> {
+            ensure!(valid_name(name), Error::<T>::InvalidName);
+            ensure!(!Reserved::<T>::contains_key(name), Error::<T>::NameReserved);
+            let now = T::Time::now().as_millis() as u64;
+            ensure!(
+                expires > now && expires <= now.saturating_add(T::MaxTermMs::get()),
+                Error::<T>::BadExpiry
+            );
+            Ok(now)
+        }
+
+        /// Writes the registration for a wallet that proved itself (v1 and v2).
+        fn do_register(
+            who: T::AccountId,
+            name: NameOf,
+            owner: Wallet,
+            expires: u64,
+            now: u64,
+        ) -> DispatchResult {
+            let registered = match Names::<T>::get(&name) {
+                // Same owner: extension only. The registrar cannot shorten a paid term and then take the name after it ends (security 2026-10-12).
+                Some(r) if r.owner == owner => {
+                    ensure!(expires >= r.expires, Error::<T>::ExpiryShortened);
+                    r.registered
+                }
+                Some(r) if r.expires.saturating_add(GRACE_MS) > now => {
+                    return Err(Error::<T>::NameTaken.into())
+                }
+                _ => {
+                    Self::new_owner(&name);
+                    now
+                }
+            };
+            Names::<T>::insert(
+                &name,
+                NameRecord {
+                    owner: owner.clone(),
+                    registered,
+                    expires,
+                    registrar: who,
+                },
+            );
+            Self::deposit_event(Event::Registered {
+                name,
+                owner,
+                expires,
+            });
+            Ok(())
+        }
+
+        /// The owner cancels its offers (v1 and v2; `message` builds the message text from the name and the number). Not possible during an active lock.
+        fn do_cancel(
+            name: NameOf,
+            owner_proof: &WalletProof,
+            message: impl Fn(&[u8], u32) -> Vec<u8>,
+        ) -> DispatchResult {
+            let now = T::Time::now().as_millis() as u64;
+            let r = Names::<T>::get(&name).ok_or(Error::<T>::NotRegistered)?;
+            ensure!(!Self::locked(&name, now), Error::<T>::SaleLocked);
+            let nonce = SaleNonce::<T>::get(&name);
+            let owner = verify_proof(owner_proof, &message(&name, nonce))
+                .ok_or(Error::<T>::InvalidProof)?;
+            ensure!(owner == r.owner, Error::<T>::BadOffer);
+            SaleNonce::<T>::insert(&name, nonce.wrapping_add(1));
+            Locks::<T>::remove(&name);
+            LockTerms::<T>::remove(&name);
+            Self::deposit_event(Event::OfferCancelled { name });
+            Ok(())
+        }
+
+        /// Checks up to `max` locks from where it last stopped, and removes the expired ones and v1 locks (with no payment terms, they can never complete since
+        /// spec 9). An active v2 lock is not touched. Returns the number of removed locks.
+        pub fn cleanup(max: u32) -> u32 {
+            let now = T::Time::now().as_millis() as u64;
+            let mut it = match CleanupCursor::<T>::take() {
+                Some(k) => Locks::<T>::iter_from(k.into_inner()),
+                None => Locks::<T>::iter(),
+            };
+            let mut stale: Vec<NameOf> = Vec::new();
+            let mut seen = 0u32;
+            while seen < max {
+                let Some((name, lock)) = it.next() else { break };
+                seen += 1;
+                if lock.until < now || !LockTerms::<T>::contains_key(&name) {
+                    stale.push(name);
+                }
+            }
+            if seen == max {
+                // more may follow: continue after this key next time (a key past the end simply restarts the scan)
+                CleanupCursor::<T>::put(BoundedVec::truncate_from(it.last_raw_key().to_vec()));
+            }
+            let removed = stale.len() as u32;
+            for name in stale {
+                Locks::<T>::remove(&name);
+                LockTerms::<T>::remove(&name);
+            }
+            removed
         }
 
         /// A new owner: all previous offers and locks lapse.

@@ -104,8 +104,9 @@ fn a_flood_of_admission_solutions_cannot_exceed_the_block_weight_budget() {
         for seed in 100u8..140 {
             let pair = sp_core::sr25519::Pair::from_seed(&[seed; 32]);
             let who = AccountId::from(pair.public().0);
-            // B2 (2026-10-14): vouched accounts, so each one really runs Argon2 (an unvouched one is refused cheaply first)
-            madar_admission::NodeOperator::<Runtime>::insert(&who, AccountId::from([200u8; 32]));
+            // B2 (2026-10-14): vouched accounts, so each one really runs Argon2 (an unvouched one is refused cheaply first).
+            // spec 9: one operator each — the per-operator attempt budget alone would stop a single operator after 3.
+            madar_admission::NodeOperator::<Runtime>::insert(&who, AccountId::from([seed.wrapping_add(100); 32]));
             let call = RuntimeCall::Admission(madar_admission::Call::submit_admission_solution { nonce: 0 });
             match Executive::apply_extrinsic(signed(&pair, &who, call, 0)) {
                 Ok(_) => included += 1,

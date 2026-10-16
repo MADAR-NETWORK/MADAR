@@ -16,6 +16,10 @@ fn frame_system_version_is_the_single_declared_runtime_version() {
     );
     assert_eq!(&*system_version.spec_name, "madar");
     assert_eq!(system_version.spec_version, 9);
+    assert_eq!(
+        system_version.transaction_version, 2,
+        "spec 9 removed calls (Admission 2 and 3, names v1): tx version 1 -> 2"
+    );
 }
 
 #[test]
