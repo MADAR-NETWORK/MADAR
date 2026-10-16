@@ -28,8 +28,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 mod health;
+mod rewards;
 mod tray;
 mod update_sig;
+mod winreg;
 
 /// Public key for update signatures (ed25519). The private key is kept outside the repository.
 /// An update or sync snapshot without a valid signature from this key is rejected.
@@ -106,6 +108,43 @@ const CTRL_C_EVENT: u32 = 0;
 #[link(name = "user32")]
 extern "system" {
     fn MessageBoxW(hwnd: *mut c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
+}
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteW(
+        hwnd: *mut c_void,
+        verb: *const u16,
+        file: *const u16,
+        params: *const u16,
+        dir: *const u16,
+        show: i32,
+    ) -> isize;
+}
+// Processes: stop a node left from an earlier run, limit its cores (no PowerShell; see http_agent).
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn CloseHandle(h: *mut c_void) -> i32;
+    fn TerminateProcess(h: *mut c_void, code: u32) -> i32;
+    fn SetProcessAffinityMask(h: *mut c_void, mask: usize) -> i32;
+    fn QueryFullProcessImageNameW(
+        h: *mut c_void,
+        flags: u32,
+        name: *mut u16,
+        size: *mut u32,
+    ) -> i32;
+}
+const PROCESS_TERMINATE: u32 = 0x0001;
+const PROCESS_SET_INFORMATION: u32 = 0x0200;
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+/// The full path of a running process's program, if it can be read.
+fn process_image(h: *mut c_void) -> Option<PathBuf> {
+    let mut buf = vec![0u16; 1024];
+    let mut len = buf.len() as u32;
+    // SAFETY: buf holds `len` u16s; the call writes at most that many and updates len.
+    (unsafe { QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) } != 0)
+        .then(|| PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
 }
 const MB_ICONERROR: u32 = 0x10;
 const MB_ICONINFORMATION: u32 = 0x40;
@@ -194,7 +233,7 @@ fn ask_yes_no(text: &str, cli_flag: &str) -> bool {
 }
 
 /// Windows "Apps" key (current user, no admin rights): written by the installer and removed by this command.
-const UNINSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\MADARNode";
+const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\MADARNode";
 
 /// Uninstall: confirm, then ask about the data (kept by default), graceful stop, remove autostart,
 /// the shortcut and the "Apps" entry, then delete the program files after this process exits.
@@ -236,16 +275,8 @@ fn cmd_uninstall() -> i32 {
         .map(|e| e.display().to_string())
         .unwrap_or_default();
     let reg_value_has = |key: &str, value: &str, needle: &str| -> bool {
-        Command::new("reg")
-            .args(["query", key, "/v", value])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .to_lowercase()
-                    .contains(&needle.to_lowercase())
-            })
-            .unwrap_or(false)
+        winreg::get_string(key, value)
+            .is_some_and(|v| v.to_lowercase().contains(&needle.to_lowercase()))
     };
     if reg_value_has(RUN_KEY, RUN_VALUE, &exe_path) {
         let _ = set_autostart(false);
@@ -255,26 +286,19 @@ fn cmd_uninstall() -> i32 {
         "InstallLocation",
         &p.root.display().to_string(),
     );
-    let reg = |args: &[&str]| {
-        let _ = Command::new("reg")
-            .args(args)
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    };
     if owns_apps_entry {
-        reg(&["delete", UNINSTALL_KEY, "/f"]);
+        let _ = winreg::delete_key(UNINSTALL_KEY);
     }
     // Desktop shortcut: only if it points to this installation.
     let exe = std::env::current_exe()
         .map(|e| e.display().to_string())
         .unwrap_or_default();
-    let _ = powershell(&format!(
-        "$l = Join-Path ([Environment]::GetFolderPath('Desktop')) 'MADAR Network.lnk'; \
-         if ((Test-Path -LiteralPath $l) -and ((New-Object -ComObject WScript.Shell).CreateShortcut($l).TargetPath -eq {})) {{ Remove-Item -LiteralPath $l -Force }}",
-        ps_quote(&exe)
-    ));
+    for desktop in desktop_dirs() {
+        let l = desktop.join("MADAR Network.lnk");
+        if fs::read(&l).is_ok_and(|b| link_points_to(&b, &exe)) {
+            let _ = fs::remove_file(&l);
+        }
+    }
     // Program files are deleted after this process exits (a running file cannot be deleted). Data is kept unless explicitly requested.
     let root = p.root.display().to_string();
     let mut targets: Vec<String> = ["bin", "chain", "ui"]
@@ -371,6 +395,8 @@ struct Config {
     /// MADAR registry endpoint (POST JSON). Empty = not enabled yet.
     registry_url: String,
     latest_url: String,
+    /// "My earnings": the earnings service (HTTPS on madar-network.com, or loopback for local tests).
+    rewards_url: String,
 }
 
 fn load_config(p: &Paths) -> Config {
@@ -381,6 +407,13 @@ fn load_config(p: &Paths) -> Config {
     Config {
         registry_url: v["registry_url"].as_str().unwrap_or("").trim().to_string(),
         latest_url: v["latest_url"].as_str().unwrap_or("").trim().to_string(),
+        rewards_url: v["rewards_url"]
+            .as_str()
+            .map(str::trim)
+            .filter(|u| !u.is_empty() && registry_url_ok(u))
+            .unwrap_or(rewards::DEFAULT_BASE)
+            .trim_end_matches('/')
+            .to_string(),
     }
 }
 
@@ -404,46 +437,23 @@ fn save_settings(p: &Paths, v: &Value) {
 }
 
 // Start with Windows: a value under HKCU\...\Run for the current user only (no admin rights), running `start --background`.
-const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+// Read and written through the registry API itself (winreg), not reg.exe.
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "MADAR Node";
 
 fn autostart_enabled() -> bool {
-    Command::new("reg")
-        .args(["query", RUN_KEY, "/v", RUN_VALUE])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    winreg::get_string(RUN_KEY, RUN_VALUE).is_some()
 }
 
 fn set_autostart(on: bool) -> bool {
     let exe = std::env::current_exe()
         .map(|e| e.display().to_string())
         .unwrap_or_default();
-    let mut c = Command::new("reg");
     if on {
-        c.args([
-            "add",
-            RUN_KEY,
-            "/v",
-            RUN_VALUE,
-            "/t",
-            "REG_SZ",
-            "/d",
-            &format!("\"{exe}\" start --background"),
-            "/f",
-        ]);
+        winreg::set_string(RUN_KEY, RUN_VALUE, &format!("\"{exe}\" start --background"))
     } else {
-        c.args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
+        winreg::delete_value(RUN_KEY, RUN_VALUE)
     }
-    c.creation_flags(CREATE_NO_WINDOW)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 fn is_madar_https(url: &str) -> bool {
@@ -580,6 +590,10 @@ fn find_edge() -> Option<PathBuf> {
 /// Opens the MADAR page in an **app window**: Edge in `--app` mode (no address bar or tabs) with a dedicated MADAR
 /// profile inside data (so it shows as a separate app in the taskbar). Without Edge: the default browser.
 fn open_browser(url: &str) {
+    // the window is already open: bring it to the front instead of opening another one
+    if focus_app_window() {
+        return;
+    }
     if let Some(edge) = find_edge() {
         let profile = paths().data.join("window");
         let ok = Command::new(edge)
@@ -600,60 +614,91 @@ fn open_browser(url: &str) {
             return;
         }
     }
-    let _ = Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+    shell_open(url);
 }
 
-fn b64(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16
-            | (*c.get(1).unwrap_or(&0) as u32) << 8
-            | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            if i <= c.len() {
-                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
+/// The app window's title ends with an invisible mark (U+2060, set by ui/index.html), so it can be found again.
+const WINDOW_MARK: char = '\u{2060}';
+
+#[link(name = "user32")]
+extern "system" {
+    fn EnumWindows(cb: extern "system" fn(*mut c_void, isize) -> i32, param: isize) -> i32;
+    fn GetWindowTextW(h: *mut c_void, buf: *mut u16, max: i32) -> i32;
+    fn IsWindowVisible(h: *mut c_void) -> i32;
+    fn IsIconic(h: *mut c_void) -> i32;
+    fn ShowWindow(h: *mut c_void, cmd: i32) -> i32;
+    fn SetForegroundWindow(h: isize) -> i32; // same declaration as tray.rs (HWND as isize)
+}
+
+extern "system" fn find_marked(h: *mut c_void, found: isize) -> i32 {
+    let mut buf = [0u16; 256];
+    // SAFETY: the buffer holds 256 u16 and the call writes at most 255 plus NUL.
+    let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32) };
+    // Windows wraps a right-to-left title in direction marks (U+202B … U+202C): drop them before looking for the mark
+    let title: String = String::from_utf16_lossy(&buf[..n.max(0) as usize])
+        .chars()
+        .filter(|c| !matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .collect();
+    // SAFETY: `found` is the address of the caller's *mut c_void, alive for the whole EnumWindows call.
+    if title.ends_with(WINDOW_MARK) && unsafe { IsWindowVisible(h) } != 0 {
+        unsafe { *(found as *mut *mut c_void) = h };
+        return 0; // stop
     }
-    out
+    1
 }
 
-fn ps_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+/// Brings the open app window to the front (restored if minimised). False when none is open.
+fn focus_app_window() -> bool {
+    let mut found: *mut c_void = std::ptr::null_mut();
+    // SAFETY: the callback writes only through the pointer we pass, during this call.
+    unsafe {
+        EnumWindows(find_marked, &mut found as *mut *mut c_void as isize);
+        if found.is_null() {
+            return false;
+        }
+        if IsIconic(found) != 0 {
+            ShowWindow(found, 9); // SW_RESTORE
+        }
+        SetForegroundWindow(found as isize);
+    }
+    true
 }
 
-/// Hidden PowerShell with an encoded command (no quoting issues). Used for HTTPS only, since std has no TLS.
-fn powershell(script: &str) -> Result<String, String> {
-    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let full = format!(
-        "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; \
-         [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; \
-         try {{ & ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}')))) }} \
-         catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}",
-        b64(&utf16)
+/// Where the user's desktop may be (plain, or moved into OneDrive).
+fn desktop_dirs() -> Vec<PathBuf> {
+    let home = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
+    let mut v = vec![home.join("Desktop")];
+    if let Ok(od) = std::env::var("OneDrive") {
+        v.push(PathBuf::from(od).join("Desktop"));
+    }
+    v
+}
+
+/// Does a .lnk file name this program as its target? (The path is stored in it as ANSI and/or UTF-16.)
+fn link_points_to(lnk: &[u8], exe: &str) -> bool {
+    let lower = |b: &[u8]| b.iter().map(u8::to_ascii_lowercase).collect::<Vec<u8>>();
+    let hay = lower(lnk);
+    let ansi = lower(exe.as_bytes());
+    let utf16: Vec<u8> = lower(
+        &exe.encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>(),
     );
-    let enc: Vec<u8> = full.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let out = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-EncodedCommand",
-            &b64(&enc),
-        ])
+    let has = |n: &[u8]| !n.is_empty() && hay.windows(n.len()).any(|w| w == n);
+    has(&ansi) || has(&utf16)
+}
+
+/// Windows' own tar (System32, Windows 10 1803+): makes and opens .zip files with no PowerShell.
+fn system_tar(args: &[&str]) -> Result<(), String> {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let out = Command::new(Path::new(&root).join("System32").join("tar.exe"))
+        .args(args)
         .stdin(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        Ok(())
     } else {
         Err(String::from_utf8_lossy(&out.stderr)
             .trim()
@@ -667,14 +712,25 @@ fn file_url_path(url: &str) -> PathBuf {
     PathBuf::from(url.trim_start_matches("file:///").replace("%20", " "))
 }
 
+/// HTTPS from the app itself (ureq + rustls). Until 2.0.9 these went through a hidden PowerShell, which antivirus
+/// behaviour monitors treat as malware (Bitdefender removed the app on 2026-10-13).
+fn http_agent(timeout_secs: u64) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(timeout_secs))
+        .user_agent(&format!("MADAR-Node/{VERSION}"))
+        .build()
+}
+
 fn http_get_text(url: &str) -> Result<String, String> {
     if url.starts_with("file:///") {
         return fs::read_to_string(file_url_path(url)).map_err(|e| e.to_string());
     }
-    powershell(&format!(
-        "$r = Invoke-WebRequest -UseBasicParsing -Uri {} -TimeoutSec 15; [Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray())",
-        ps_quote(url)
-    ))
+    http_agent(15)
+        .get(url)
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_string()
+        .map_err(|e| e.to_string())
 }
 
 fn http_download(url: &str, to: &Path) -> Result<(), String> {
@@ -683,28 +739,182 @@ fn http_download(url: &str, to: &Path) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| e.to_string());
     }
-    powershell(&format!(
-        "Invoke-WebRequest -UseBasicParsing -Uri {} -OutFile {} -TimeoutSec 900",
-        ps_quote(url),
-        ps_quote(&to.display().to_string())
-    ))
-    .map(|_| ())
+    // big files: no limit on the whole transfer (slow lines), only on connecting and on each read
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(20))
+        .timeout_read(Duration::from_secs(60))
+        .user_agent(&format!("MADAR-Node/{VERSION}"))
+        .build();
+    let r = agent.get(url).call().map_err(|e| e.to_string())?;
+    let mut f = File::create(to).map_err(|e| e.to_string())?;
+    std::io::copy(&mut r.into_reader(), &mut f).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())
 }
 
+/// POST JSON: the status code (also for 4xx/5xx answers), Err only when no answer came.
 fn http_post_json(url: &str, body_file: &Path) -> Result<u16, String> {
-    let out = powershell(&format!(
-        "$b = [IO.File]::ReadAllBytes({}); $r = Invoke-WebRequest -UseBasicParsing -Uri {} -Method Post \
-         -ContentType 'application/json; charset=utf-8' -Body $b -TimeoutSec 20; 'STATUS:' + [int]$r.StatusCode",
-        ps_quote(&body_file.display().to_string()),
-        ps_quote(url)
-    ))?;
-    out.lines()
-        .find_map(|l| {
-            l.trim()
-                .strip_prefix("STATUS:")
-                .and_then(|c| c.parse().ok())
-        })
-        .ok_or_else(|| "Unexpected response from the registry".to_string())
+    let body = fs::read(body_file).map_err(|e| e.to_string())?;
+    http_post_bytes(url, &body).map(|(c, _)| c)
+}
+
+/// POST JSON and read the answer (status + body), also for 4xx/5xx answers.
+fn http_post_json_read(url: &str, body: &Value, _data: &Path) -> Result<(u16, String), String> {
+    http_post_bytes(url, body.to_string().as_bytes())
+}
+
+fn http_post_bytes(url: &str, body: &[u8]) -> Result<(u16, String), String> {
+    let req = http_agent(20)
+        .post(url)
+        .set("Content-Type", "application/json; charset=utf-8");
+    match req.send_bytes(body) {
+        Ok(r) => Ok((r.status(), r.into_string().unwrap_or_default())),
+        Err(ureq::Error::Status(c, r)) => Ok((c, r.into_string().unwrap_or_default())),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Opens a web address (or mailto:) in the user's own default program, through Windows itself.
+fn shell_open(target: &str) -> bool {
+    let (verb, what) = (wide("open"), wide(target));
+    // SAFETY: both strings are NUL-terminated UTF-16 that live for the whole call.
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            what.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        ) > 32
+    }
+}
+
+/// The user's own default browser (where their wallet is), not the app window.
+fn open_default_browser(url: &str) {
+    shell_open(url);
+}
+
+// ---------------------------------------------------------------- "My earnings"
+
+/// Every monitor round: while the node runs, one signed beat in each 10-minute window and the balance read after it;
+/// while a link code waits, ask every 30 s whether the wallet signed. Errors are logged and retried next round.
+fn rewards_tick(p: &Paths, state: &Arc<Mutex<State>>) {
+    let (running, rpc_port) = {
+        let st = state.lock().unwrap();
+        (
+            st.child.is_some() && st.paused.is_none() && !st.stopping,
+            st.ports.1,
+        )
+    };
+    let cfg = load_config(p);
+    let now = now_unix();
+    // is "My earnings" open? (the owner opens it on the service; asked at start and every 30 minutes)
+    let mut rs0 = rewards::load_state(&p.data);
+    if now.saturating_sub(rs0["state_at"].as_u64().unwrap_or(0)) >= rewards::STATE_EVERY {
+        rs0["state_at"] = json!(now);
+        if let Ok((200, b)) =
+            http_post_json_read(&format!("{}/state", cfg.rewards_url), &json!({}), &p.data)
+        {
+            rs0["open"] = json!(serde_json::from_str::<Value>(&b)
+                .ok()
+                .and_then(|v| v["open"].as_bool())
+                .unwrap_or(false));
+        }
+        rewards::save_state(&p.data, &rs0);
+    }
+    // the node's own network identity (made by the node on its first start)
+    let Some(key) = rewards::load_key(&p.data) else {
+        return;
+    };
+    let mut rs = rewards::load_state(&p.data);
+    let waiting = rs["code"].as_str().is_some()
+        && now.saturating_sub(rs["code_at"].as_u64().unwrap_or(0)) < rewards::CODE_TTL;
+    let linked = rs["linked"].as_bool().unwrap_or(false);
+    // a link that may have just happened: read «me»
+    if waiting
+        && !linked
+        && now.saturating_sub(rs["me_at"].as_u64().unwrap_or(0)) >= rewards::LINK_POLL_EVERY
+    {
+        rewards_me(p, &cfg, &key, &mut rs);
+    }
+    if !running
+        || !rs["linked"].as_bool().unwrap_or(false)
+        || !rewards::beat_due(now, rs["beat_at"].as_u64().unwrap_or(0))
+    {
+        rewards::save_state(&p.data, &rs);
+        return;
+    }
+    // a recent block of the node: 20 blocks under its finalized head (about two minutes), so the service, which reads
+    // our own chain once a minute, already knows it and checks it is one of ours
+    let Some(fin) = rpc(rpc_port, "chain_getFinalizedHead", json!([]))
+        .and_then(|h| h.as_str().map(String::from))
+    else {
+        return;
+    };
+    let header = rpc(rpc_port, "chain_getHeader", json!([fin]));
+    let Some(head) = header.and_then(|h| {
+        h["number"]
+            .as_str()
+            .and_then(|n| u64::from_str_radix(n.trim_start_matches("0x"), 16).ok())
+    }) else {
+        return;
+    };
+    let number = head.saturating_sub(20).max(1);
+    let Some(hash) = rpc(rpc_port, "chain_getBlockHash", json!([number]))
+        .and_then(|h| h.as_str().map(String::from))
+    else {
+        return;
+    };
+    rs["beat_at"] = json!(now);
+    match http_post_json_read(
+        &format!("{}/beat", cfg.rewards_url),
+        &rewards::beat_body(&key, now, number, &hash),
+        &p.data,
+    ) {
+        // "not_connected": the service does not see this node on the network (shown in the card)
+        Ok((200, b)) => {
+            rs["beat_state"] = serde_json::from_str::<Value>(&b)
+                .map(|v| v["state"].clone())
+                .unwrap_or(Value::Null)
+        }
+        Ok((409, _)) | Ok((404, _)) => rs["linked"] = json!(false),
+        Ok((c, b)) => log(
+            p,
+            &format!(
+                "rewards beat: {c} {}",
+                b.chars().take(120).collect::<String>()
+            ),
+        ),
+        Err(e) => log(p, &format!("rewards beat: {e}")),
+    }
+    rewards_me(p, &cfg, &key, &mut rs);
+    rewards::save_state(&p.data, &rs);
+}
+
+/// Reads the balance («me») into the state.
+fn rewards_me(p: &Paths, cfg: &Config, key: &ed25519_dalek::SigningKey, rs: &mut Value) {
+    let now = now_unix();
+    rs["me_at"] = json!(now);
+    match http_post_json_read(
+        &format!("{}/me", cfg.rewards_url),
+        &rewards::me_body(key, now),
+        &p.data,
+    ) {
+        Ok((200, b)) => {
+            if let Ok(v) = serde_json::from_str::<Value>(&b) {
+                let linked = v["linked"].as_bool().unwrap_or(false);
+                if linked && !rs["linked"].as_bool().unwrap_or(false) {
+                    log(p, "rewards: node linked to a wallet");
+                    rs["code"] = Value::Null;
+                }
+                rs["linked"] = json!(linked);
+                rs["me"] = v;
+            }
+        }
+        Ok((404, _)) => rs["linked"] = json!(false),
+        Ok((c, _)) => log(p, &format!("rewards me: {c}")),
+        Err(e) => log(p, &format!("rewards me: {e}")),
+    }
 }
 
 // ---------------------------------------------------------------- Account validation
@@ -786,10 +996,16 @@ pub fn registry_payload(name: &str, peer_id_suffix: &str, email: &str) -> Value 
 
 fn main() {
     // SAFETY: AttachConsole takes no pointers; HAS_CONSOLE is written only here, before any thread.
-    unsafe { HAS_CONSOLE = AttachConsole(u32::MAX) != 0 };
     let cmd = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "start".to_string());
+    // The background app («serve») never joins a console: joined to the PowerShell window it was started from (by the
+    // installer), it was ended when that window closed (seen 2026-10-13: the app vanished after installs).
+    if cmd != "serve" {
+        unsafe { HAS_CONSOLE = AttachConsole(u32::MAX) != 0 };
+    }
+    // a crash is written to app.log before the app ends (it runs with no window to show it)
+    std::panic::set_hook(Box::new(|info| log(&paths(), &format!("panic: {info}"))));
     let code = match cmd.as_str() {
         "start" => cmd_start(),
         "serve" => cmd_serve(),
@@ -1146,6 +1362,9 @@ fn start_node(p: &Paths, st: &mut State) {
         BOOTNODE.into(),
         "--bootnodes".into(),
         BOOTNODE_BACKUP.into(),
+        // "My earnings": the earnings service counts a node while the main server sees it connected, so keep that link
+        "--reserved-nodes".into(),
+        BOOTNODE.into(),
         // P2P on 127.0.0.1 only: no port open on the network and no firewall prompt; the connection is outbound to the gateway.
         // "Help the network" (optional): accepts connections from other nodes. Default is 127.0.0.1 only (outbound only).
         "--listen-addr".into(),
@@ -1183,6 +1402,15 @@ fn start_node(p: &Paths, st: &mut State) {
         "--max-runtime-instances".into(),
         "2".into(),
     ];
+    // the node's network identity comes from the app (data\node-key), which signs the "My earnings" messages with it
+    let mut args = args;
+    match rewards::load_or_create_key(&p.data) {
+        Ok(_) => args.extend([
+            "--node-key-file".to_string(),
+            rewards::node_key_file(&p.data).display().to_string(),
+        ]),
+        Err(e) => log(p, &format!("node key: {e}")),
+    }
     // For a graceful stop with Ctrl+C: no CREATE_NEW_PROCESS_GROUP (it disables Ctrl+C in the node), and we re-enable the inherited
     // Ctrl+C handling (the serve process itself was created in a new group, so it inherited "ignore Ctrl+C").
     // SAFETY: Win32 call with no pointers.
@@ -1258,7 +1486,7 @@ fn stop_node(p: &Paths, st: &mut State) {
     let _ = fs::remove_file(p.data.join("node.pid"));
 }
 
-/// A node left over from a previous run: closed only if its command line carries this installation's data folder.
+/// A node left over from a previous run: closed only if its program is this installation's madar-node.exe (bin\ in its folder).
 fn stop_orphan_node(p: &Paths) {
     let Some(pid) = fs::read_to_string(p.data.join("node.pid"))
         .ok()
@@ -1266,14 +1494,31 @@ fn stop_orphan_node(p: &Paths) {
     else {
         return;
     };
-    let script = format!(
-        "$x = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; if ($x -and $x.Name -eq 'madar-node.exe' -and $x.CommandLine -and $x.CommandLine.Contains({})) {{ Stop-Process -Id {pid} -Force; 'stopped' }}",
-        ps_quote(&p.base.display().to_string())
-    );
-    if powershell(&script)
-        .map(|o| o.contains("stopped"))
-        .unwrap_or(false)
-    {
+    let ours = p
+        .root
+        .join("bin")
+        .join("madar-node.exe")
+        .display()
+        .to_string()
+        .to_lowercase();
+    // SAFETY: the handle is checked for null and closed once.
+    let stopped = unsafe {
+        let h = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            0,
+            pid,
+        );
+        if h.is_null() {
+            false
+        } else {
+            let same = process_image(h)
+                .is_some_and(|img| img.display().to_string().to_lowercase() == ours);
+            let ok = same && TerminateProcess(h, 1) != 0;
+            CloseHandle(h);
+            ok
+        }
+    };
+    if stopped {
         log(p, &format!("stopped orphan node pid {pid}"));
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -1289,14 +1534,21 @@ fn limit_cores(p: &Paths, pid: u32) {
         return;
     }
     let use_cores = (cores / 2).clamp(1, 4);
-    let mask: u64 = (1u64 << use_cores) - 1;
-    let r = powershell(&format!(
-        "(Get-Process -Id {pid}).ProcessorAffinity = {mask}"
-    ));
-    log(
-        p,
-        &format!("affinity {use_cores}/{cores} cores: {}", r.is_ok()),
-    );
+    let mask: usize = (1usize << use_cores) - 1;
+    // SAFETY: the handle is checked for null and closed once.
+    let ok = unsafe {
+        let h = OpenProcess(
+            PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        );
+        !h.is_null() && {
+            let r = SetProcessAffinityMask(h, mask) != 0;
+            CloseHandle(h);
+            r
+        }
+    };
+    log(p, &format!("affinity {use_cores}/{cores} cores: {ok}"));
 }
 
 fn node_alive(st: &mut State) -> bool {
@@ -1710,11 +1962,8 @@ fn bootstrap_then_start(state: &Arc<Mutex<State>>) {
             if ok {
                 state.lock().unwrap().bootstrap = Some("extracting");
                 let _ = fs::create_dir_all(&p.base);
-                let r = powershell(&format!(
-                    "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
-                    ps_quote(&zip.display().to_string()),
-                    ps_quote(&p.base.display().to_string())
-                ));
+                let (zip_s, base_s) = (zip.display().to_string(), p.base.display().to_string());
+                let r = system_tar(&["-x", "-f", &zip_s, "-C", &base_s]);
                 log(&p, &format!("snapshot #{block} applied: {}", r.is_ok()));
             } else {
                 log(&p, "snapshot download/verify failed — normal sync");
@@ -1759,7 +2008,10 @@ fn monitor_tick(
     let saver = settings["saver"].as_bool().unwrap_or(false);
     // Power every loop; metered internet every 5 minutes; the clock every hour.
     env.0 = health::on_battery();
-    if env
+    // only when the user turned on saver mode: the check needs PowerShell (WinRT), which antivirus watches closely
+    if !saver {
+        env.1 = None;
+    } else if env
         .2
         .map(|t| t.elapsed() >= Duration::from_secs(300))
         .unwrap_or(true)
@@ -2042,6 +2294,7 @@ fn cmd_serve() -> i32 {
                 std::thread::sleep(Duration::from_secs(15));
                 monitor_tick(&p, &state, &mut env);
                 registration_tick(&p, &state);
+                rewards_tick(&p, &state);
             }
         });
     }
@@ -2144,11 +2397,20 @@ fn make_report(p: &Paths, status: &Value) -> Result<PathBuf, String> {
             .join("\n"),
     )?;
     let zip = dir.join(format!("MADAR-report-{}.zip", now_unix()));
-    powershell(&format!(
-        "Compress-Archive -Path {} -DestinationPath {} -Force",
-        ps_quote(&stage.join("*").display().to_string()),
-        ps_quote(&zip.display().to_string())
-    ))?;
+    let zip_s = zip.display().to_string();
+    let stage_s = stage.display().to_string();
+    system_tar(&[
+        "-a",
+        "-c",
+        "-f",
+        &zip_s,
+        "-C",
+        &stage_s,
+        "info.json",
+        "app.log",
+        "node.log",
+        "VERSION",
+    ])?;
     let _ = fs::remove_dir_all(&stage);
     // Show the file, and open a ready email to the support address.
     let _ = Command::new("explorer")
@@ -2162,12 +2424,9 @@ fn make_report(p: &Paths, status: &Value) -> Result<PathBuf, String> {
             .replace('\\', "%5C")
             .replace(' ', "%20")
     );
-    let _ = Command::new("cmd")
-        .raw_arg(format!(
-            "/C start \"\" \"mailto:{SUPPORT_EMAIL}?subject={subject}&body={body}\""
-        ))
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+    shell_open(&format!(
+        "mailto:{SUPPORT_EMAIL}?subject={subject}&body={body}"
+    ));
     log(p, &format!("problem report created: {}", zip.display()));
     Ok(zip)
 }
@@ -2378,6 +2637,68 @@ fn handle(mut s: TcpStream, state: &Arc<Mutex<State>>) {
                 "200 OK",
                 json!({"ok":true,"lang":settings["lang"],"autostart":autostart_enabled()}),
             );
+        }
+        // "My earnings": the saved state (balance, linked or not, a waiting link)
+        ("POST", "/api/rewards") if token_ok => {
+            let rs = rewards::load_state(&p.data);
+            let waiting = rs["code"].as_str().is_some()
+                && now_unix().saturating_sub(rs["code_at"].as_u64().unwrap_or(0))
+                    < rewards::CODE_TTL;
+            // the node's short name, so the user can check the link page names the same node
+            let node = rewards::load_key(&p.data).map(|k| rewards::short_peer(&k));
+            respond_json(
+                &mut s,
+                "200 OK",
+                json!({"linked": rs["linked"], "open": rs["open"].as_bool().unwrap_or(false), "me": rs["me"], "node": node, "not_connected": rs["beat_state"] == "not_connected",
+                "waiting": waiting && !rs["linked"].as_bool().unwrap_or(false), "link": if waiting { rs["link"].clone() } else { Value::Null }}),
+            );
+        }
+        // "Link your wallet": a one-time code from the service, then the link page in the user's own browser
+        ("POST", "/api/rewards/link") if token_ok => {
+            let cfg = load_config(&p);
+            // the node's network identity exists after its first start
+            let Some(key) = rewards::load_key(&p.data) else {
+                return respond_json(&mut s, "409 Conflict", json!({"error": "no_identity"}));
+            };
+            match http_post_json_read(
+                &format!("{}/hello", cfg.rewards_url),
+                &rewards::hello_body(&key, now_unix()),
+                &p.data,
+            ) {
+                Ok((200, b)) => {
+                    let v: Value = serde_json::from_str(&b).unwrap_or(Value::Null);
+                    let link = v["link"].as_str().unwrap_or("").to_string();
+                    if !rewards::link_url_ok(&link) {
+                        return respond_json(
+                            &mut s,
+                            "502 Bad Gateway",
+                            json!({"error": "bad_answer"}),
+                        );
+                    }
+                    let mut rs = rewards::load_state(&p.data);
+                    rs["code"] = v["code"].clone();
+                    rs["code_at"] = json!(now_unix());
+                    rs["link"] = json!(link);
+                    rewards::save_state(&p.data, &rs);
+                    open_default_browser(&link);
+                    respond_json(&mut s, "200 OK", json!({"ok": true, "link": link}));
+                }
+                Ok((400, b)) if b.contains("clock") => {
+                    respond_json(&mut s, "400 Bad Request", json!({"error": "clock"}))
+                }
+                // the service does not see this node on the network yet
+                Ok((409, b)) if b.contains("not_connected") => {
+                    respond_json(&mut s, "409 Conflict", json!({"error": "not_connected"}))
+                }
+                Ok((c, _)) => {
+                    log(&p, &format!("rewards hello: {c}"));
+                    respond_json(&mut s, "502 Bad Gateway", json!({"error": "service"}))
+                }
+                Err(e) => {
+                    log(&p, &format!("rewards hello: {e}"));
+                    respond_json(&mut s, "502 Bad Gateway", json!({"error": "offline"}))
+                }
+            }
         }
         ("POST", "/api/report") if token_ok => {
             let snapshot = status_json(&p, &mut state.lock().unwrap());
@@ -2695,13 +3016,5 @@ mod tests {
             parse_version(VERSION)
         );
         assert!(parse_version("x.y").is_none());
-    }
-
-    #[test]
-    fn base64_matches_known_vectors() {
-        assert_eq!(b64(b""), "");
-        assert_eq!(b64(b"f"), "Zg==");
-        assert_eq!(b64(b"fo"), "Zm8=");
-        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
     }
 }

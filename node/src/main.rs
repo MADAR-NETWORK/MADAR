@@ -4,6 +4,8 @@
 #[cfg(test)]
 mod b1_storage;
 mod babe_watch;
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 mod chain_spec;
 mod cli;
 mod command;

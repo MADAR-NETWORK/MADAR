@@ -25,8 +25,9 @@ impl<T: frame_system::Config> WeightInfo for ConservativeWeight<T> {
     fn set_committee_members(p: u32) -> Weight {
         let p = p as u64;
         // Reads {Members, Proposals} + Voting per proposal; writes {Members, Prime, event ×3} + Voting per proposal.
+        // B1 (WASM, x86): 10.3 us + ~4.3 us per proposal (79 us at p=16) => 10 us per proposal (was 0.5 us) covers >= 2x.
         Weight::from_parts(
-            100_000_000u64.saturating_add(p.saturating_mul(500_000)),
+            100_000_000u64.saturating_add(p.saturating_mul(10_000_000)),
             4_000u64.saturating_add(p.saturating_mul(2_048)),
         )
         .saturating_add(T::DbWeight::get().reads_writes(3 + p, 6 + p))

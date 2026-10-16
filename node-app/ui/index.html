@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
-<title>MADAR Node</title>
+<title>MADAR Node&#8288;</title>
 <style>
 :root{
   --bg:#F4F6FB; --surface:#FFFFFF; --surface-2:#F0F3FA; --border:#E3E8F2; --ink:#0E1528; --mute:#5B6784;
@@ -77,6 +77,8 @@ input[type=email]{direction:ltr}
 button{font:inherit;font-weight:600;padding:10px 18px;border-radius:11px;border:1px solid var(--border);background:var(--surface);color:var(--ink);cursor:pointer;transition:transform .05s,filter .2s}
 button:active{transform:translateY(1px)}
 button.primary{background:linear-gradient(135deg,var(--brand-a),var(--brand-b));border:0;color:#fff;margin-top:18px;width:100%;padding:12px}
+.earn-big{font-size:34px;font-weight:700;margin:4px 0 10px}.earn-big span{font-size:15px;color:var(--mute);font-weight:600}
+#earn-url{word-break:break-all;user-select:all}
 button.primary:disabled{filter:grayscale(.6) opacity(.55);cursor:default}
 button.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 35%,var(--border))}
 .err{color:var(--bad);min-height:1.4em;margin-top:8px;font-size:13px}
@@ -189,6 +191,31 @@ footer{color:var(--mute);font-size:12px;text-align:center;margin-top:18px}
       <div class="chart"><div class="lbl"><span data-t="chart_peers"></span><b id="c-peers-now">—</b></div><svg id="c-peers" viewBox="0 0 200 54" preserveAspectRatio="none"></svg></div>
     </div>
     <p class="hint" id="chart-empty" data-t="chart_empty"></p>
+  </section>
+
+  <!-- "My earnings": link the node to a wallet, then its earnings -->
+  <section class="card" id="earn-card" hidden>
+    <h2 data-t="earn_title"></h2>
+    <div id="earn-unlinked">
+      <p class="sentence" data-t="earn_intro"></p>
+      <p class="hint" id="earn-node-line" hidden><span data-t="earn_node"></span> <b id="earn-node" dir="ltr"></b></p>
+      <button class="primary" id="earn-link" data-t="earn_link_btn"></button>
+      <div id="earn-wait" hidden><p class="hint" data-t="earn_waiting"></p><p class="hint" data-t="earn_check"></p><p class="hint"><span data-t="earn_copy_hint"></span><br><code id="earn-url" dir="ltr"></code></p></div>
+      <div class="err" id="earn-err"></div>
+    </div>
+    <div id="earn-linked" hidden>
+      <div class="earn-big"><b id="earn-bal" dir="ltr"></b> <span data-t="earn_unit"></span></div>
+      <dl>
+        <dt data-t="earn_today"></dt><dd id="earn-today" dir="ltr"></dd>
+        <dt data-t="earn_month"></dt><dd id="earn-month" dir="ltr"></dd>
+        <dt data-t="earn_hours"></dt><dd id="earn-hours" dir="ltr"></dd>
+        <dt data-t="earn_wallet"></dt><dd id="earn-wallet" dir="ltr"></dd>
+      </dl>
+      <p class="err" id="earn-off" hidden data-t="earn_not_connected"></p>
+      <p class="hint" id="earn-gift" hidden data-t="earn_gift"></p>
+      <p class="hint" id="earn-gift-wait" hidden data-t="earn_gift_wait"></p>
+      <p class="hint" data-t="earn_kept"></p>
+    </div>
   </section>
 
   <!-- account: form, then locked view -->
@@ -320,6 +347,34 @@ Object.assign(I18N.fr, {help_title:"Aider le réseau",help_hint:"Laissez d'autre
 Object.assign(I18N.es, {help_title:"Ayudar a la red",help_hint:"Permite que otros nodos se conecten al tuyo para fortalecer la red. Windows puede pedirte permitir MADAR en el firewall. El nodo se reinicia para aplicarlo.",report_title:"Informe de problema",report_hint:"Crea un archivo con registros técnicos (sin correo, cuenta, claves ni direcciones IP) y abre un correo al soporte de MADAR.",report_btn:"Enviar un informe",report_done:"Se creó el archivo del informe:\n{v}\n\nAdjúntalo al correo que se acaba de abrir y envíalo.",e_report_failed:"No se pudo crear el informe."});
 Object.assign(I18N.tr, {help_title:"Ağa yardım et",help_hint:"Ağın güçlenmesi için diğer düğümlerin sizinkine bağlanmasına izin verin. Windows güvenlik duvarında MADAR'a izin vermenizi isteyebilir. Uygulamak için düğüm yeniden başlar.",report_title:"Sorun bildirimi",report_hint:"Teknik günlükleri içeren bir dosya oluşturur (e-posta, hesap, anahtar veya IP adresi olmadan) ve MADAR desteğine bir e-posta açar.",report_btn:"Sorun bildir",report_done:"Rapor dosyası oluşturuldu:\n{v}\n\nAçılan e-postaya ekleyip gönderin.",e_report_failed:"Rapor oluşturulamadı."});
 Object.assign(I18N.id, {help_title:"Bantu jaringan",help_hint:"Izinkan node lain terhubung ke node Anda agar jaringan lebih kuat. Windows mungkin meminta izin firewall untuk MADAR. Node dimulai ulang untuk menerapkannya.",report_title:"Laporan masalah",report_hint:"Membuat berkas berisi log teknis (tanpa email, akun, kunci, atau alamat IP) dan membuka email ke dukungan MADAR.",report_btn:"Kirim laporan masalah",report_done:"Berkas laporan telah dibuat:\n{v}\n\nLampirkan ke email yang baru terbuka lalu kirim.",e_report_failed:"Laporan tidak dapat dibuat."});
+Object.assign(I18N.en, {earn_title:"My earnings",earn_link_btn:"Link your wallet",earn_waiting:"A page opened in your browser: sign there with your wallet (Madar Wallet, MetaMask or Phantom). This card updates by itself.",earn_copy_hint:"If no page opened, open this address in the browser where your wallet is:",earn_today:"Today",earn_month:"This month",earn_hours:"Hours counted",earn_wallet:"Wallet",e_clock:"Your computer's clock is wrong. Set the date and time automatically, then try again.",e_offline:"Could not reach MADAR. Check your internet and try again.",e_service:"The MADAR service did not answer. Try again in a minute.",e_key_failed:"The node's earnings key could not be read.",e_bad_answer:"Unexpected answer from MADAR. Try again."});
+Object.assign(I18N.fr, {earn_title:"Mes gains",earn_link_btn:"Lier mon portefeuille",earn_waiting:"Une page s'est ouverte dans votre navigateur : signez-y avec votre portefeuille (Madar Wallet, MetaMask ou Phantom). Cette carte se met à jour seule.",earn_copy_hint:"Si aucune page ne s'est ouverte, ouvrez cette adresse dans le navigateur où se trouve votre portefeuille :",earn_today:"Aujourd'hui",earn_month:"Ce mois-ci",earn_hours:"Heures comptées",earn_wallet:"Portefeuille",e_clock:"L'horloge de votre ordinateur est fausse. Réglez la date et l'heure automatiquement, puis réessayez.",e_offline:"Impossible de joindre MADAR. Vérifiez votre connexion puis réessayez.",e_service:"Le service MADAR n'a pas répondu. Réessayez dans une minute.",e_key_failed:"La clé de gains du nœud est illisible.",e_bad_answer:"Réponse inattendue de MADAR. Réessayez."});
+Object.assign(I18N.es, {earn_title:"Mis ganancias",earn_link_btn:"Vincular mi billetera",earn_waiting:"Se abrió una página en tu navegador: firma allí con tu billetera (Madar Wallet, MetaMask o Phantom). Esta tarjeta se actualiza sola.",earn_copy_hint:"Si no se abrió ninguna página, abre esta dirección en el navegador donde está tu billetera:",earn_today:"Hoy",earn_month:"Este mes",earn_hours:"Horas contadas",earn_wallet:"Billetera",e_clock:"El reloj de tu equipo está mal. Ajusta la fecha y la hora automáticamente y vuelve a intentarlo.",e_offline:"No se pudo conectar con MADAR. Revisa tu internet y vuelve a intentarlo.",e_service:"El servicio de MADAR no respondió. Inténtalo en un minuto.",e_key_failed:"No se pudo leer la clave de ganancias del nodo.",e_bad_answer:"Respuesta inesperada de MADAR. Vuelve a intentarlo."});
+Object.assign(I18N.tr, {earn_title:"Kazançlarım",earn_link_btn:"Cüzdanımı bağla",earn_waiting:"Tarayıcınızda bir sayfa açıldı: orada cüzdanınızla imzalayın (Madar Wallet, MetaMask veya Phantom). Bu kart kendiliğinden güncellenir.",earn_copy_hint:"Sayfa açılmadıysa bu adresi cüzdanınızın olduğu tarayıcıda açın:",earn_today:"Bugün",earn_month:"Bu ay",earn_hours:"Sayılan saatler",earn_wallet:"Cüzdan",e_clock:"Bilgisayarınızın saati yanlış. Tarih ve saati otomatik ayarlayıp tekrar deneyin.",e_offline:"MADAR'a ulaşılamadı. İnternetinizi kontrol edip tekrar deneyin.",e_service:"MADAR hizmeti yanıt vermedi. Bir dakika sonra tekrar deneyin.",e_key_failed:"Düğümün kazanç anahtarı okunamadı.",e_bad_answer:"MADAR'dan beklenmeyen yanıt. Tekrar deneyin."});
+Object.assign(I18N.id, {earn_title:"Penghasilan saya",earn_link_btn:"Hubungkan dompet",earn_waiting:"Sebuah halaman terbuka di browser Anda: tanda tangani di sana dengan dompet Anda (Madar Wallet, MetaMask, atau Phantom). Kartu ini diperbarui sendiri.",earn_copy_hint:"Jika tidak ada halaman yang terbuka, buka alamat ini di browser tempat dompet Anda berada:",earn_today:"Hari ini",earn_month:"Bulan ini",earn_hours:"Jam yang dihitung",earn_wallet:"Dompet",e_clock:"Jam komputer Anda salah. Atur tanggal dan waktu secara otomatis, lalu coba lagi.",e_offline:"Tidak dapat terhubung ke MADAR. Periksa internet Anda lalu coba lagi.",e_service:"Layanan MADAR tidak menjawab. Coba lagi sebentar lagi.",e_key_failed:"Kunci penghasilan node tidak dapat dibaca.",e_bad_answer:"Jawaban tak terduga dari MADAR. Coba lagi."});
+// 2026-10-13 (security review): counted only while connected; the gift after a full day; the node's name to compare
+// 2026-10-13 (owner): nodes link to Madar Wallet only
+Object.assign(I18N.en, {earn_waiting: "A page opened in your browser: sign there with Madar Wallet. This card updates by itself."});
+Object.assign(I18N.fr, {earn_waiting: "Une page s'est ouverte dans votre navigateur : signez-y avec Madar Wallet. Cette carte se met à jour seule."});
+Object.assign(I18N.es, {earn_waiting: "Se abrió una página en tu navegador: firma allí con Madar Wallet. Esta tarjeta se actualiza sola."});
+Object.assign(I18N.tr, {earn_waiting: "Tarayıcınızda bir sayfa açıldı: orada Madar Wallet ile imzalayın. Bu kart kendiliğinden güncellenir."});
+Object.assign(I18N.id, {earn_waiting: "Sebuah halaman terbuka di browser Anda: tanda tangani di sana dengan Madar Wallet. Kartu ini diperbarui sendiri."});
+Object.assign(I18N.en, {e_not_connected:"Your node is not connected to the MADAR network yet. Let it run for a few minutes, then try again."});
+Object.assign(I18N.fr, {e_not_connected: "Votre nœud n'est pas encore connecté au réseau MADAR. Laissez-le tourner quelques minutes, puis réessayez."});
+Object.assign(I18N.es, {e_not_connected: "Tu nodo aún no está conectado a la red MADAR. Déjalo funcionar unos minutos y vuelve a intentarlo."});
+Object.assign(I18N.tr, {e_not_connected: "Düğümünüz henüz MADAR ağına bağlı değil. Birkaç dakika çalışmasına izin verin, sonra tekrar deneyin."});
+Object.assign(I18N.id, {e_not_connected: "Node Anda belum terhubung ke jaringan MADAR. Biarkan berjalan beberapa menit, lalu coba lagi."});
+Object.assign(I18N.en, {"earn_node":"This node:","earn_check":"Check that the page shows the same node name as above before you sign.","earn_not_connected":"Your node is not connected to the MADAR network right now, so this time is not counted. Keep it running and check your internet.","e_no_identity":"Start the node first, then link your wallet."});
+Object.assign(I18N.fr, {"earn_node":"Ce nœud :","earn_check":"Vérifiez que la page affiche le même nom de nœud que ci-dessus avant de signer.","earn_not_connected":"Votre nœud n'est pas connecté au réseau MADAR pour le moment ; ce temps n'est donc pas compté. Laissez-le tourner et vérifiez votre connexion.","e_no_identity":"Démarrez d'abord le nœud, puis liez votre portefeuille."});
+Object.assign(I18N.es, {"earn_node":"Este nodo:","earn_check":"Comprueba que la página muestre el mismo nombre de nodo que aparece arriba antes de firmar.","earn_not_connected":"Tu nodo no está conectado a la red MADAR ahora mismo, así que este tiempo no cuenta. Mantenlo en marcha y revisa tu internet.","e_no_identity":"Inicia primero el nodo y luego vincula tu billetera."});
+Object.assign(I18N.tr, {"earn_node":"Bu düğüm:","earn_check":"İmzalamadan önce sayfanın yukarıdaki düğüm adının aynısını gösterdiğini kontrol edin.","earn_not_connected":"Düğümünüz şu anda MADAR ağına bağlı değil, bu yüzden bu süre sayılmıyor. Çalışır durumda tutun ve internetinizi kontrol edin.","e_no_identity":"Önce düğümü başlatın, sonra cüzdanınızı bağlayın."});
+Object.assign(I18N.id, {"earn_node":"Node ini:","earn_check":"Pastikan halaman menampilkan nama node yang sama dengan di atas sebelum menandatangani.","earn_not_connected":"Node Anda sedang tidak terhubung ke jaringan MADAR, jadi waktu ini tidak dihitung. Biarkan tetap berjalan dan periksa internet Anda.","e_no_identity":"Jalankan node terlebih dahulu, lalu hubungkan dompet Anda."});
+// Orbits (owner 2026-10-15): the earnings unit and the immediate welcome gift.
+Object.assign(I18N.en, {"earn_unit":"Orbits","earn_intro":"Link this node to your wallet and it collects Orbits for every hour it runs and stays connected: a full day of running gives 1 Orbit. A 1 Orbit welcome gift is added as soon as the node starts counting.","earn_gift":"Includes the 1 Orbit welcome gift.","earn_rate":"1 Orbit for a full day of running.","earn_gift_wait":"The 1 Orbit welcome gift is added within the first hour the node is counted.","earn_kept":"Your Orbits are kept for you; what comes next will be announced later."});
+Object.assign(I18N.fr, {"earn_unit":"Orbits","earn_intro":"Liez ce nœud à votre portefeuille et il collecte des Orbits pour chaque heure où il fonctionne et reste connecté : une journée complète donne 1 Orbit. Un cadeau de bienvenue de 1 Orbit est ajouté dès que le nœud commence à être compté.","earn_gift":"Inclut le cadeau de bienvenue de 1 Orbit.","earn_rate":"1 Orbit pour une journée complète de fonctionnement.","earn_gift_wait":"Le cadeau de bienvenue de 1 Orbit est ajouté dans la première heure où le nœud est compté.","earn_kept":"Vos Orbits sont conservés pour vous ; la suite sera annoncée plus tard."});
+Object.assign(I18N.es, {"earn_unit":"Orbits","earn_intro":"Vincula este nodo a tu billetera y reunirá Orbits por cada hora que funcione conectado: un día completo da 1 Orbit. El regalo de bienvenida de 1 Orbit se añade en cuanto el nodo empieza a contar.","earn_gift":"Incluye el regalo de bienvenida de 1 Orbit.","earn_rate":"1 Orbit por un día completo de funcionamiento.","earn_gift_wait":"El regalo de bienvenida de 1 Orbit se añade en la primera hora en que el nodo cuenta.","earn_kept":"Tus Orbits se guardan para ti; lo siguiente se anunciará más adelante."});
+Object.assign(I18N.tr, {"earn_unit":"Orbit","earn_intro":"Bu düğümü cüzdanınıza bağlayın; çalıştığı ve ağa bağlı kaldığı her saat için Orbit toplar: tam bir gün çalışma 1 Orbit verir. 1 Orbit hoş geldin hediyesi, düğüm sayılmaya başlar başlamaz eklenir.","earn_gift":"1 Orbit hoş geldin hediyesi dahildir.","earn_rate":"Tam bir gün çalışma için 1 Orbit.","earn_gift_wait":"1 Orbit hoş geldin hediyesi, düğümün sayıldığı ilk saat içinde eklenir.","earn_kept":"Orbit'leriniz sizin için saklanır; devamı daha sonra duyurulacak."});
+Object.assign(I18N.id, {"earn_unit":"Orbit","earn_intro":"Hubungkan node ini ke dompet Anda dan node akan mengumpulkan Orbit untuk setiap jam berjalan dan tetap terhubung: satu hari penuh memberi 1 Orbit. Hadiah sambutan 1 Orbit ditambahkan begitu node mulai dihitung.","earn_gift":"Termasuk hadiah sambutan 1 Orbit.","earn_rate":"1 Orbit untuk satu hari penuh berjalan.","earn_gift_wait":"Hadiah sambutan 1 Orbit ditambahkan dalam jam pertama node dihitung.","earn_kept":"Orbit Anda disimpan untuk Anda; kelanjutannya akan diumumkan nanti."});
 let LANG = "en", stopped = false, updating = false, built = false, lastStatus = null;
 
 const t = (k, v) => ((I18N[LANG] && I18N[LANG][k]) || I18N.en[k] || k).replace("{v}", v ?? "");
@@ -331,7 +386,7 @@ function applyLang(lang) {
   document.documentElement.dir = "ltr";
   $("lang").value = LANG;
   document.querySelectorAll("[data-t]").forEach(el => el.textContent = t(el.dataset.t));
-  document.title = t("app_title");
+  document.title = t("app_title") + "\u2060"; // invisible mark: the app finds its open window by it
   if (lastStatus) render(lastStatus);
 }
 
@@ -372,8 +427,43 @@ $("upd-btn").addEventListener("click", async () => {
   if (!ok) { $("upd-text").textContent = t("e_" + (j.error || "generic")); $("upd-btn").disabled = false; }
 });
 
+// "My earnings"
+let earnBusy = false;
+async function renderEarn() {
+  let r;
+  try { r = await post("/api/rewards"); } catch (e) { return; }
+  if (!r.ok) return;
+  const v = r.j, me = v.me || {};
+  const linked = !!v.linked;
+  $("earn-card").hidden = !(v.open || linked);
+  if (!(v.open || linked)) return;
+  $("earn-unlinked").hidden = linked; $("earn-linked").hidden = !linked;
+  if (linked) {
+    $("earn-bal").textContent = me.balance || "0";
+    $("earn-today").textContent = (me.today || "0") + " " + t("earn_unit");
+    $("earn-month").textContent = (me.month || "0") + " " + t("earn_unit");
+    $("earn-hours").textContent = String(me.hours || 0);
+    $("earn-wallet").textContent = me.wallet || "—";
+    $("earn-gift").hidden = !(me.gift && me.gift !== "0");
+    $("earn-gift-wait").hidden = !me.gift_pending;
+    $("earn-off").hidden = !v.not_connected;
+  } else {
+    $("earn-node-line").hidden = !v.node; $("earn-node").textContent = v.node || "";
+    $("earn-wait").hidden = !v.waiting;
+    if (v.waiting && v.link) $("earn-url").textContent = v.link;
+    $("earn-link").disabled = earnBusy;
+  }
+}
+$("earn-link").addEventListener("click", async () => {
+  earnBusy = true; $("earn-link").disabled = true; $("earn-err").textContent = "";
+  const {ok, j} = await post("/api/rewards/link");
+  earnBusy = false;
+  if (!ok) { $("earn-err").textContent = t("e_" + (j.error || "service")); $("earn-link").disabled = false; return; }
+  $("earn-url").textContent = j.link || ""; $("earn-wait").hidden = false;
+});
+
 function showOff(title, hint) {
-  ["hero-card", "acc-form", "acc-view", "settings"].forEach(s => $(s).hidden = true);
+  ["hero-card", "acc-form", "acc-view", "settings", "earn-card"].forEach(s => $(s).hidden = true);
   $("off").hidden = false; $("off-title").textContent = t(title); $("off-hint").textContent = t(hint);
 }
 
@@ -527,7 +617,7 @@ function render(s) {
   $("foot").textContent = `${t("version")} ${s.version}` + (s.update && s.update.error && !s.update.available ? ` · ${t("check_failed")}` : "");
   $("off").hidden = true;
   if (!s.account) {
-    ["hero-card", "acc-view", "settings", "chart-card", "repair-card"].forEach(id => $(id).hidden = true);
+    ["hero-card", "acc-view", "settings", "chart-card", "repair-card", "earn-card"].forEach(id => $(id).hidden = true);
     const onboarded = s.settings && s.settings.onboarded;
     $("welcome").hidden = !!onboarded; $("acc-form").hidden = !onboarded;
     if (!onboarded) renderWelcome();
@@ -535,6 +625,7 @@ function render(s) {
   }
   $("welcome").hidden = true; $("acc-form").hidden = true;
   $("hero-card").hidden = false; $("acc-view").hidden = false; $("settings").hidden = false; $("chart-card").hidden = false;
+  renderEarn(); // shown only when "My earnings" is open on the service, or the node is already linked
   $("repair-card").hidden = s.state !== "needs_repair";
   renderCharts(s.history || []);
   $("saver").checked = !!(s.settings && s.settings.saver);

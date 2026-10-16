@@ -230,6 +230,66 @@ fn the_owner_can_register_again_and_keeps_the_original_date() {
     });
 }
 
+/// Security 2026-10-12: a registrar re-sending the owner's old signature with a nearer `expires` must not shorten the paid
+/// term (it could then wait for expiry + grace and hand the name to someone else).
+#[test]
+fn registering_again_for_the_same_owner_never_shortens_the_term() {
+    ext().execute_with(|| {
+        let (a, w) = evm_proof(3, &register_message(b"ahmad"));
+        assert_ok!(Names::register(
+            RuntimeOrigin::signed(REG),
+            nm("ahmad"),
+            a.clone(),
+            START + 3650 * DAY
+        ));
+        assert_noop!(
+            Names::register(
+                RuntimeOrigin::signed(REG),
+                nm("ahmad"),
+                a.clone(),
+                START + 1
+            ),
+            Error::<Test>::ExpiryShortened
+        );
+        assert_noop!(
+            Names::register(
+                RuntimeOrigin::signed(REG),
+                nm("ahmad"),
+                a.clone(),
+                START + 3649 * DAY
+            ),
+            Error::<Test>::ExpiryShortened
+        );
+        // the same term again is harmless, a longer one is an extension
+        assert_ok!(Names::register(
+            RuntimeOrigin::signed(REG),
+            nm("ahmad"),
+            a.clone(),
+            START + 3650 * DAY
+        ));
+        assert_ok!(Names::register(
+            RuntimeOrigin::signed(REG),
+            nm("ahmad"),
+            a,
+            START + 3655 * DAY
+        ));
+        let r = madar_names::Names::<Test>::get(nm("ahmad")).unwrap();
+        assert_eq!((r.owner, r.expires), (w, START + 3655 * DAY));
+        // so another wallet still cannot take it a year later
+        Now::set(START + 400 * DAY);
+        let (b, _) = sol_proof(9, &register_message(b"ahmad"));
+        assert_noop!(
+            Names::register(
+                RuntimeOrigin::signed(REG),
+                nm("ahmad"),
+                b,
+                START + 800 * DAY
+            ),
+            Error::<Test>::NameTaken
+        );
+    });
+}
+
 #[test]
 fn renew_extends_only_within_the_grace_and_limits() {
     ext().execute_with(|| {
@@ -420,6 +480,42 @@ fn with_owner() -> Wallet {
 
 const PAY: &str = "0x00000000000000000000000000000000000000aa";
 
+/// The safe sale as the service sends it since spec 8 (v2 only): the exact amount = the signed price, the rail from the
+/// payee (EVM -> base_usdc, Solana -> solana_usdc).
+#[allow(clippy::too_many_arguments)]
+fn lock1(
+    name: NameOf,
+    sp: WalletProof,
+    price: u64,
+    to: BoundedVec<u8, frame_support::traits::ConstU32<MAX_PAY_TO>>,
+    offer_until: u64,
+    bp: WalletProof,
+    lock_until: u64,
+) -> sp_runtime::DispatchResult {
+    let rail = if to.starts_with(b"0x") { 2 } else { 0 };
+    Names::lock_sale_v2(
+        RuntimeOrigin::signed(REG),
+        name,
+        sp,
+        price,
+        to,
+        offer_until,
+        bp,
+        lock_until,
+        price.saturating_mul(MICRO_PER_CENT),
+        rail,
+    )
+}
+
+/// Completes with a payment reference that fits the lock's rail (a fresh base hash per moment).
+fn complete1(name: NameOf) -> sp_runtime::DispatchResult {
+    let r = match madar_names::LockTerms::<Test>::get(&name) {
+        Some(t) if t.rail < 2 => SOL_SIG.to_string(),
+        _ => format!("base:0x{:064x}", Now::get()),
+    };
+    Names::complete_sale_v2(RuntimeOrigin::signed(REG), name, pref(&r))
+}
+
 #[test]
 fn sale_messages_are_exact() {
     assert_eq!(
@@ -446,8 +542,7 @@ fn safe_sale_locks_then_moves_the_name_keeping_its_term() {
             &sale_message(b"ahmad", n, 50_000, PAY.as_bytes(), START + 30 * DAY),
         );
         let (bp, buyer) = sol_proof(8, &buy_message(b"ahmad", n, 50_000));
-        assert_ok!(Names::lock_sale(
-            RuntimeOrigin::signed(REG),
+        assert_ok!(lock1(
             nm("ahmad"),
             sp.clone(),
             50_000,
@@ -460,8 +555,7 @@ fn safe_sale_locks_then_moves_the_name_keeping_its_term() {
         // while locked: no second buyer, no cancel
         let (bp2, _) = sol_proof(9, &buy_message(b"ahmad", n, 50_000));
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp.clone(),
                 50_000,
@@ -479,34 +573,31 @@ fn safe_sale_locks_then_moves_the_name_keeping_its_term() {
         );
         // payment arrived: the name moves, the paid term stays
         Now::set(START + 20 * MIN);
-        assert_ok!(Names::complete_sale(
-            RuntimeOrigin::signed(REG),
-            nm("ahmad")
-        ));
+        assert_ok!(complete1(nm("ahmad")));
         let r = madar_names::Names::<Test>::get(nm("ahmad")).unwrap();
         assert_eq!(
             (r.owner.clone(), r.expires, r.registered),
             (buyer.clone(), START + 365 * DAY, START + 20 * MIN)
         );
         System::assert_has_event(
-            Event::Sold {
+            Event::SaleCompletedV2 {
                 name: nm("ahmad"),
                 from: seller,
                 to: buyer,
                 price_cents: 50_000,
+                pay_to: pay_to(PAY),
+                rail: 2,
+                amount: 500_000_000,
+                payment_ref: pref(&format!("base:0x{:064x}", START + 20 * MIN)),
             }
             .into(),
         );
         // the old offer and signatures are dead now
         assert!(madar_names::Locks::<Test>::get(nm("ahmad")).is_none());
-        assert_noop!(
-            Names::complete_sale(RuntimeOrigin::signed(REG), nm("ahmad")),
-            Error::<Test>::NoSaleLock
-        );
+        assert_noop!(complete1(nm("ahmad")), Error::<Test>::NoSaleLock);
         let (bp3, _) = sol_proof(9, &buy_message(b"ahmad", n, 50_000));
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp,
                 50_000,
@@ -532,8 +623,7 @@ fn an_unpaid_lock_lapses_by_itself_within_an_hour() {
         let (bp, _) = sol_proof(8, &buy_message(b"ahmad", n, 1_000));
         // never more than 60 minutes
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp.clone(),
                 1_000,
@@ -545,8 +635,7 @@ fn an_unpaid_lock_lapses_by_itself_within_an_hour() {
             Error::<Test>::BadLock
         );
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp.clone(),
                 1_000,
@@ -557,8 +646,7 @@ fn an_unpaid_lock_lapses_by_itself_within_an_hour() {
             ),
             Error::<Test>::BadLock
         );
-        assert_ok!(Names::lock_sale(
-            RuntimeOrigin::signed(REG),
+        assert_ok!(lock1(
             nm("ahmad"),
             sp.clone(),
             1_000,
@@ -570,17 +658,13 @@ fn an_unpaid_lock_lapses_by_itself_within_an_hour() {
         // one minute after the deadline: no sale can complete, the name is free for another buyer, owner unchanged
         Now::set(START + 61 * MIN);
         assert!(!Names::locked(&nm("ahmad"), START + 61 * MIN));
-        assert_noop!(
-            Names::complete_sale(RuntimeOrigin::signed(REG), nm("ahmad")),
-            Error::<Test>::NoSaleLock
-        );
+        assert_noop!(complete1(nm("ahmad")), Error::<Test>::NoSaleLock);
         assert_eq!(
             madar_names::Names::<Test>::get(nm("ahmad")).unwrap().owner,
             seller
         );
         let (bp2, _) = sol_proof(9, &buy_message(b"ahmad", n, 1_000));
-        assert_ok!(Names::lock_sale(
-            RuntimeOrigin::signed(REG),
+        assert_ok!(lock1(
             nm("ahmad"),
             sp,
             1_000,
@@ -604,8 +688,7 @@ fn offers_must_come_from_the_owner_match_the_price_and_be_current() {
             &sale_message(b"ahmad", n, 1_000, PAY.as_bytes(), START + DAY),
         );
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 fake,
                 1_000,
@@ -622,8 +705,7 @@ fn offers_must_come_from_the_owner_match_the_price_and_be_current() {
             &sale_message(b"ahmad", n, 1_000, PAY.as_bytes(), START + DAY),
         );
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp.clone(),
                 900,
@@ -635,8 +717,7 @@ fn offers_must_come_from_the_owner_match_the_price_and_be_current() {
             Error::<Test>::InvalidProof
         );
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp.clone(),
                 1_000,
@@ -650,8 +731,7 @@ fn offers_must_come_from_the_owner_match_the_price_and_be_current() {
         // the buyer signed another price
         let (bp_low, _) = sol_proof(8, &buy_message(b"ahmad", n, 500));
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp.clone(),
                 1_000,
@@ -665,8 +745,7 @@ fn offers_must_come_from_the_owner_match_the_price_and_be_current() {
         // the owner cannot buy from himself, zero price is refused, an expired offer is refused
         let (self_buy, _) = evm_proof(3, &buy_message(b"ahmad", n, 1_000));
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp.clone(),
                 1_000,
@@ -678,8 +757,7 @@ fn offers_must_come_from_the_owner_match_the_price_and_be_current() {
             Error::<Test>::BadOffer
         );
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp.clone(),
                 0,
@@ -692,8 +770,7 @@ fn offers_must_come_from_the_owner_match_the_price_and_be_current() {
         );
         Now::set(START + DAY + 1);
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp,
                 1_000,
@@ -705,7 +782,7 @@ fn offers_must_come_from_the_owner_match_the_price_and_be_current() {
             Error::<Test>::BadOffer
         );
         assert_noop!(
-            Names::complete_sale(RuntimeOrigin::signed(99), nm("ahmad")),
+            Names::complete_sale_v2(RuntimeOrigin::signed(99), nm("ahmad"), pref(BASE_TX)),
             Error::<Test>::NotRegistrar
         );
     });
@@ -734,8 +811,7 @@ fn the_owner_can_cancel_offers_and_old_signatures_die() {
         assert_eq!(madar_names::SaleNonce::<Test>::get(nm("ahmad")), n + 1);
         let (bp, _) = sol_proof(8, &buy_message(b"ahmad", n, 1_000));
         assert_noop!(
-            Names::lock_sale(
-                RuntimeOrigin::signed(REG),
+            lock1(
                 nm("ahmad"),
                 sp,
                 1_000,
@@ -745,6 +821,322 @@ fn the_owner_can_cancel_offers_and_old_signatures_die() {
                 START + MIN
             ),
             Error::<Test>::InvalidProof
+        );
+    });
+}
+
+// ---------------------------------------------------------------- spec 8: payment proof on chain
+
+const SOL_PAY: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+const BASE_TX: &str = "base:0x1111111111111111111111111111111111111111111111111111111111111111";
+const SOL_SIG: &str = "solana:5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW";
+
+fn pref(s: &str) -> PaymentRef {
+    BoundedVec::try_from(s.as_bytes().to_vec()).unwrap()
+}
+
+/// Seller (EVM seed 3) offers ahmad.madar for `price`, paid to `to`; buyer (Solana seed 8) accepts.
+fn v2_proofs(price: u64, to: &str) -> (WalletProof, WalletProof, Wallet) {
+    let n = madar_names::SaleNonce::<Test>::get(nm("ahmad"));
+    let (sp, _) = evm_proof(
+        3,
+        &sale_message(b"ahmad", n, price, to.as_bytes(), START + DAY),
+    );
+    let (bp, buyer) = sol_proof(8, &buy_message(b"ahmad", n, price));
+    (sp, bp, buyer)
+}
+
+fn lock_v2(
+    sp: WalletProof,
+    bp: WalletProof,
+    price: u64,
+    to: &str,
+    amount: u64,
+    rail: u8,
+) -> sp_runtime::DispatchResult {
+    Names::lock_sale_v2(
+        RuntimeOrigin::signed(REG),
+        nm("ahmad"),
+        sp,
+        price,
+        pay_to(to),
+        START + DAY,
+        bp,
+        START + 30 * MIN,
+        amount,
+        rail,
+    )
+}
+
+#[test]
+fn payment_refs_rails_and_amounts_are_checked() {
+    assert!(valid_payment_ref(2, BASE_TX.as_bytes()));
+    assert!(valid_payment_ref(
+        3,
+        BASE_TX.replace("base", "arbitrum").as_bytes()
+    ));
+    assert!(valid_payment_ref(0, SOL_SIG.as_bytes()) && valid_payment_ref(1, SOL_SIG.as_bytes()));
+    assert!(
+        !valid_payment_ref(3, BASE_TX.as_bytes()),
+        "base ref for an arbitrum lock"
+    );
+    assert!(!valid_payment_ref(0, BASE_TX.as_bytes()));
+    assert!(
+        !valid_payment_ref(
+            2,
+            "base:0xABCDEF1111111111111111111111111111111111111111111111111111111111".as_bytes()
+        ),
+        "upper-case hex refused"
+    );
+    assert!(!valid_payment_ref(2, b"base:0x1234"), "short hash");
+    assert!(!valid_payment_ref(
+        2,
+        b"base 0x1111111111111111111111111111111111111111111111111111111111111111"
+    ));
+    assert!(
+        !valid_payment_ref(0, b"solana:0OIl000000000000000000000000000000000000"),
+        "not base58"
+    );
+    assert!(!valid_payment_ref(0, b"solana:abc"));
+    assert!(!valid_payment_ref(5, SOL_SIG.as_bytes()), "unknown rail");
+    assert_eq!(rail_chain(4), Some(&b"arbitrum"[..]));
+    assert!(rail_fits_pay_to(2, PAY.as_bytes()) && !rail_fits_pay_to(0, PAY.as_bytes()));
+    assert!(
+        rail_fits_pay_to(1, SOL_PAY.as_bytes())
+            && !rail_fits_pay_to(4, SOL_PAY.as_bytes())
+            && !rail_fits_pay_to(9, PAY.as_bytes())
+    );
+    // $500.00 = 500_000_000 micro; the registrar service adds 0.0001 to 0.0999
+    assert!(
+        amount_fits_price(500_034_700, 50_000)
+            && amount_fits_price(500_000_000, 50_000)
+            && amount_fits_price(500_099_999, 50_000)
+    );
+    assert!(
+        !amount_fits_price(499_999_999, 50_000)
+            && !amount_fits_price(500_100_000, 50_000)
+            && !amount_fits_price(u64::MAX, u64::MAX)
+    );
+}
+
+#[test]
+fn v2_sale_records_amount_rail_and_payment_ref() {
+    ext().execute_with(|| {
+        let seller = with_owner();
+        let n = madar_names::SaleNonce::<Test>::get(nm("ahmad"));
+        let (sp, bp, buyer) = v2_proofs(50_000, PAY);
+        assert_ok!(lock_v2(sp, bp, 50_000, PAY, 500_034_700, 2));
+        assert_eq!(
+            madar_names::LockTerms::<Test>::get(nm("ahmad")),
+            Some(SaleTerms {
+                rail: 2,
+                pay_amount: 500_034_700
+            })
+        );
+        System::assert_has_event(
+            Event::SaleLockedV2 {
+                name: nm("ahmad"),
+                buyer: buyer.clone(),
+                price_cents: 50_000,
+                until: START + 30 * MIN,
+                pay_to: pay_to(PAY),
+                rail: 2,
+                amount: 500_034_700,
+            }
+            .into(),
+        );
+        Now::set(START + 10 * MIN);
+        assert_ok!(Names::complete_sale_v2(
+            RuntimeOrigin::signed(REG),
+            nm("ahmad"),
+            pref(BASE_TX)
+        ));
+        let r = madar_names::Names::<Test>::get(nm("ahmad")).unwrap();
+        assert_eq!(
+            (r.owner, r.expires, r.registered),
+            (buyer.clone(), START + 365 * DAY, START + 10 * MIN)
+        );
+        System::assert_has_event(
+            Event::SaleCompletedV2 {
+                name: nm("ahmad"),
+                from: seller,
+                to: buyer,
+                price_cents: 50_000,
+                pay_to: pay_to(PAY),
+                rail: 2,
+                amount: 500_034_700,
+                payment_ref: pref(BASE_TX),
+            }
+            .into(),
+        );
+        // the offer number moved on, lock and terms are gone, the payment is remembered
+        assert_eq!(madar_names::SaleNonce::<Test>::get(nm("ahmad")), n + 1);
+        assert!(
+            madar_names::Locks::<Test>::get(nm("ahmad")).is_none()
+                && madar_names::LockTerms::<Test>::get(nm("ahmad")).is_none()
+        );
+        assert_eq!(
+            madar_names::UsedPaymentRefs::<Test>::get(sp_io::hashing::blake2_256(
+                BASE_TX.as_bytes()
+            )),
+            Some(nm("ahmad"))
+        );
+        assert_noop!(
+            Names::complete_sale_v2(RuntimeOrigin::signed(REG), nm("ahmad"), pref(BASE_TX)),
+            Error::<Test>::NoSaleLock
+        );
+    });
+}
+
+#[test]
+fn v2_lock_refuses_a_wrong_rail_or_amount() {
+    ext().execute_with(|| {
+        with_owner();
+        let (sp, bp, _) = v2_proofs(50_000, PAY);
+        // EVM payee with a Solana rail, unknown rail
+        assert_noop!(
+            lock_v2(sp.clone(), bp.clone(), 50_000, PAY, 500_034_700, 0),
+            Error::<Test>::BadRail
+        );
+        assert_noop!(
+            lock_v2(sp.clone(), bp.clone(), 50_000, PAY, 500_034_700, 5),
+            Error::<Test>::BadRail
+        );
+        // below the signed price, or 0.10 or more above it
+        assert_noop!(
+            lock_v2(sp.clone(), bp.clone(), 50_000, PAY, 499_000_000, 2),
+            Error::<Test>::BadAmount
+        );
+        assert_noop!(
+            lock_v2(sp.clone(), bp.clone(), 50_000, PAY, 500_100_000, 2),
+            Error::<Test>::BadAmount
+        );
+        // the v1 checks still apply: a price the seller never signed
+        assert_noop!(
+            lock_v2(sp.clone(), bp.clone(), 40_000, PAY, 400_034_700, 2),
+            Error::<Test>::InvalidProof
+        );
+        assert_noop!(
+            Names::lock_sale_v2(
+                RuntimeOrigin::signed(99),
+                nm("ahmad"),
+                sp.clone(),
+                50_000,
+                pay_to(PAY),
+                START + DAY,
+                bp.clone(),
+                START + MIN,
+                500_034_700,
+                2
+            ),
+            Error::<Test>::NotRegistrar
+        );
+        // a Solana payee on a Solana rail is fine
+        let (sp, bp, _) = v2_proofs(1_000, SOL_PAY);
+        assert_ok!(lock_v2(sp, bp, 1_000, SOL_PAY, 10_000_100, 1));
+    });
+}
+
+#[test]
+fn v2_complete_refuses_bad_or_reused_refs_and_v1_locks() {
+    ext().execute_with(|| {
+        with_owner();
+        // a v1 lock left from before the upgrade (no amount or rail recorded): not completed by v2, and once it lapses
+        // (at most 60 minutes after the upgrade) not by the old call either
+        let (_, _, buyer) = v2_proofs(1_000, SOL_PAY);
+        madar_names::Locks::<Test>::insert(
+            nm("ahmad"),
+            SaleLock {
+                buyer,
+                until: START + 30 * MIN,
+                price_cents: 1_000,
+                pay_to: pay_to(SOL_PAY),
+            },
+        );
+        assert_noop!(
+            Names::complete_sale_v2(RuntimeOrigin::signed(REG), nm("ahmad"), pref(SOL_SIG)),
+            Error::<Test>::NotV2Lock
+        );
+        Now::set(START + 31 * MIN);
+        assert_noop!(
+            Names::complete_sale_v2(RuntimeOrigin::signed(REG), nm("ahmad"), pref(SOL_SIG)),
+            Error::<Test>::NoSaleLock
+        );
+    });
+    ext().execute_with(|| {
+        with_owner();
+        let (sp, bp, buyer) = v2_proofs(1_000, SOL_PAY);
+        assert_ok!(lock_v2(sp, bp, 1_000, SOL_PAY, 10_000_100, 0));
+        // wrong chain for the rail, malformed, not a registrar
+        assert_noop!(Names::complete_sale_v2(RuntimeOrigin::signed(REG), nm("ahmad"), pref(BASE_TX)), Error::<Test>::BadPaymentRef);
+        assert_noop!(Names::complete_sale_v2(RuntimeOrigin::signed(REG), nm("ahmad"), pref("solana:")), Error::<Test>::BadPaymentRef);
+        assert_noop!(Names::complete_sale_v2(RuntimeOrigin::signed(99), nm("ahmad"), pref(SOL_SIG)), Error::<Test>::NotRegistrar);
+        // a reference already used for another sale is refused
+        madar_names::UsedPaymentRefs::<Test>::insert(sp_io::hashing::blake2_256(SOL_SIG.as_bytes()), nm("other"));
+        assert_noop!(Names::complete_sale_v2(RuntimeOrigin::signed(REG), nm("ahmad"), pref(SOL_SIG)), Error::<Test>::PaymentRefUsed);
+        let other = "solana:4VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW";
+        // after the lock lapses nothing completes
+        Now::set(START + 31 * MIN);
+        assert_noop!(Names::complete_sale_v2(RuntimeOrigin::signed(REG), nm("ahmad"), pref(other)), Error::<Test>::NoSaleLock);
+        Now::set(START + 20 * MIN);
+        assert_ok!(Names::complete_sale_v2(RuntimeOrigin::signed(REG), nm("ahmad"), pref(other)));
+        assert_eq!(madar_names::Names::<Test>::get(nm("ahmad")).unwrap().owner, buyer);
+    });
+}
+
+#[test]
+fn a_lapsed_v2_lock_can_be_replaced_and_cancel_clears_terms() {
+    ext().execute_with(|| {
+        with_owner();
+        let (sp, bp, _) = v2_proofs(1_000, PAY);
+        assert_ok!(lock_v2(sp.clone(), bp.clone(), 1_000, PAY, 10_000_100, 3));
+        Now::set(START + 31 * MIN);
+        // the v2 lock lapsed: a new v2 lock may take its place with its own terms
+        assert_ok!(Names::lock_sale_v2(
+            RuntimeOrigin::signed(REG),
+            nm("ahmad"),
+            sp.clone(),
+            1_000,
+            pay_to(PAY),
+            START + DAY,
+            bp.clone(),
+            START + 50 * MIN,
+            10_000_200,
+            2
+        ));
+        assert_eq!(
+            madar_names::LockTerms::<Test>::get(nm("ahmad")),
+            Some(SaleTerms {
+                rail: 2,
+                pay_amount: 10_000_200
+            })
+        );
+        Now::set(START + 51 * MIN);
+        assert_ok!(Names::lock_sale_v2(
+            RuntimeOrigin::signed(REG),
+            nm("ahmad"),
+            sp,
+            1_000,
+            pay_to(PAY),
+            START + DAY,
+            bp,
+            START + 80 * MIN,
+            10_000_100,
+            4
+        ));
+        assert!(madar_names::LockTerms::<Test>::get(nm("ahmad")).is_some());
+        // lapsed again: cancelling the offers also clears the terms
+        Now::set(START + 81 * MIN);
+        let n = madar_names::SaleNonce::<Test>::get(nm("ahmad"));
+        let (cp, _) = evm_proof(3, &cancel_message(b"ahmad", n));
+        assert_ok!(Names::cancel_offer(
+            RuntimeOrigin::signed(REG),
+            nm("ahmad"),
+            cp
+        ));
+        assert!(
+            madar_names::LockTerms::<Test>::get(nm("ahmad")).is_none()
+                && madar_names::Locks::<Test>::get(nm("ahmad")).is_none()
         );
     });
 }

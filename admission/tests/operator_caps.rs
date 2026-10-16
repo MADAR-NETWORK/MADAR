@@ -124,11 +124,9 @@ fn twenty_identities_one_operator_are_capped_at_the_approved_vote_limit() {
             assert!(!A::validators().contains(id), "an unvouched identity must never become a validator");
         }
 
-        // The explicit event for every win-without-vouch case actually appeared (no silent rejection).
-        assert!(
-            events().iter().any(|e| matches!(e, AdmissionEvent::NotAdmittedNoOperator { who } if identities[3..].contains(who))),
-            "unvouched winners must be reported explicitly, not silently dropped"
-        );
+        // B2 (2026-10-14): an unvouched identity is refused explicitly at submission itself (no silent rejection and no crowding in the pool).
+        let r = submit_raw(&identities[19]);
+        assert_eq!(r.unwrap_err().error, Error::<TestRuntime>::NodeNotVouched.into(), "unvouched identities are refused explicitly at submission");
     });
 }
 
@@ -399,4 +397,61 @@ fn an_operators_own_preexisting_seat_counts_against_its_cap_and_blocks_a_second_
         );
         assert_eq!(OperatorNodes::<TestRuntime>::get(&op).len(), 0, "no vouch should have been recorded");
     });
+}
+
+/// **B2 (2026-10-14):** candidates that lost their vouch after submitting do not take a round's seats from a vouched candidate.
+/// Before the fix the draw picked the winners and then dropped the unvouched ones, so the vouched candidate could lose the
+/// seat entirely. Now only vouched candidates enter the draw, and every unvouched one gets an explicit event.
+#[test]
+fn unvouched_candidates_never_take_the_rounds_seats_from_a_vouched_one() {
+    // Several rounds with different randomness: the vouched candidate gets in at its pool's first draw every time, whatever the draw order.
+    for trial in 0u8..6 {
+        new_test_ext().execute_with(|| {
+            let op = operator(10 + trial);
+            Admission::approve_operator(RuntimeOrigin::root(), op.clone(), 1).unwrap();
+            let honest = account(200 + trial);
+            Admission::vouch_node(RuntimeOrigin::signed(op), honest.clone()).unwrap();
+            mine(trial as u64 + 1); // different randomness for every attempt
+                                    // three candidates whose vouch is withdrawn after they entered the pool (the only case where an unvouched one stays
+                                    // inside it, because submission itself refuses unvouched ones) + the vouched one fill the pool (size 4, round cap 2)
+            for (k, id) in [
+                account(150 + trial * 3),
+                account(151 + trial * 3),
+                account(152 + trial * 3),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let spam_op = operator(40 + trial * 3 + k as u8);
+                Admission::approve_operator(RuntimeOrigin::root(), spam_op.clone(), 1).unwrap();
+                Admission::vouch_node(RuntimeOrigin::signed(spam_op.clone()), id.clone()).unwrap();
+                submit_raw(&id).expect("vouched at submission");
+                Admission::revoke_vouch(RuntimeOrigin::signed(spam_op), id).unwrap();
+            }
+            submit_raw(&honest).expect("the vouched candidate enters the pool");
+            let start = frame_system::Pallet::<TestRuntime>::block_number() as u32 / 4 + 1;
+            let mut admitted = false;
+            for i in 0..4u32 {
+                rotate(start + i);
+                if A::validators().contains(&honest) {
+                    admitted = true;
+                    break;
+                }
+            }
+            assert!(
+                admitted,
+                "trial {trial}: the vouched candidate must win a seat at its pool's draw"
+            );
+            for id in [
+                account(150 + trial * 3),
+                account(151 + trial * 3),
+                account(152 + trial * 3),
+            ] {
+                assert!(
+                    !A::validators().contains(&id),
+                    "an unvouched candidate never becomes a validator"
+                );
+            }
+        });
+    }
 }

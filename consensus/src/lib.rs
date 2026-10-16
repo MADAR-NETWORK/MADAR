@@ -65,6 +65,8 @@ extern crate alloc;
 
 mod genesis_config_presets;
 pub mod membership_api;
+/// B1: SDK pallet weights = the larger of the SDK weight and the floor measured on MADAR (2× execution + MADAR's DbWeight).
+pub mod sdk_weights;
 
 pub use madar_admission;
 pub use madar_names;
@@ -280,6 +282,11 @@ impl madar_transactions::AccountCreationPolicy<AccountId, RuntimeCall> for Onboa
     fn may_create_account(who: &AccountId, call: &RuntimeCall) -> bool {
         match call {
             RuntimeCall::Admission(madar_admission::Call::submit_admission_solution { .. }) => true,
+            // B2 (spec 9): a candidate must be vouched before it applies, so an approved operator that has no account yet
+            // must be able to create it with its first vouch (only operators the 2-of-3 committee approved).
+            RuntimeCall::Admission(madar_admission::Call::vouch_node { .. }) => {
+                madar_admission::ApprovedOperators::<Runtime>::contains_key(who)
+            }
             RuntimeCall::UpgradeCommittee(
                 pallet_collective::Call::propose { .. }
                 | pallet_collective::Call::vote { .. }
@@ -293,9 +300,9 @@ impl madar_transactions::AccountCreationPolicy<AccountId, RuntimeCall> for Onboa
             RuntimeCall::Names(
                 madar_names::Call::register { .. }
                 | madar_names::Call::renew { .. }
-                | madar_names::Call::lock_sale { .. }
-                | madar_names::Call::complete_sale { .. }
-                | madar_names::Call::cancel_offer { .. },
+                | madar_names::Call::cancel_offer { .. }
+                | madar_names::Call::lock_sale_v2 { .. }
+                | madar_names::Call::complete_sale_v2 { .. },
             ) => madar_names::Pallet::<Runtime>::is_registrar(who),
             _ => false,
         }
@@ -340,6 +347,8 @@ impl frame_system::Config for Runtime {
     type AccountData = pallet_balances::AccountData<Balance>;
     /// B5: the MADAR address prefix = 85 (`madar_protocol::SS58_PREFIX`); it was the default 42.
     type SS58Prefix = ConstU16<85>;
+    /// B1 (2026-10-15): measured weights (see `sdk_weights`).
+    type SystemWeightInfo = sdk_weights::SystemWeights;
 }
 
 impl pallet_timestamp::Config for Runtime {
@@ -348,7 +357,7 @@ impl pallet_timestamp::Config for Runtime {
     /// pallet_babe provides it ready-made (`impl OnTimestampSet for Pallet<T>`).
     type OnTimestampSet = Babe;
     type MinimumPeriod = ConstU64<MINIMUM_TIMESTAMP_PERIOD_MILLIS>;
-    type WeightInfo = ();
+    type WeightInfo = sdk_weights::TimestampWeights;
 }
 
 impl pallet_babe::Config for Runtime {
@@ -358,7 +367,7 @@ impl pallet_babe::Config for Runtime {
     // (the standard wiring when a session pallet exists) — no custom internal trigger.
     type EpochChangeTrigger = pallet_babe::ExternalTrigger;
     type DisabledValidators = (); // no disabling yet — handled by Admission/Sybil.
-    type WeightInfo = ();
+    type WeightInfo = sdk_weights::BabeWeights;
     type MaxAuthorities = ConstU32<1_000>;
     type MaxNominators = ConstU32<0>; // no nomination (no stake, D5/D21).
     type KeyOwnerProof = <Historical as frame_support::traits::KeyOwnerProofSystem<(
@@ -377,7 +386,7 @@ impl pallet_babe::Config for Runtime {
 
 impl pallet_grandpa::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = ();
+    type WeightInfo = sdk_weights::GrandpaWeights;
     type MaxAuthorities = ConstU32<1_000>;
     type MaxNominators = ConstU32<0>;
     // The set-id→session history is kept for the membership term (84 epochs): required so an old equivocation proof is accepted.
@@ -402,7 +411,7 @@ impl pallet_balances::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type RuntimeHoldReason = RuntimeHoldReason;
     type RuntimeFreezeReason = RuntimeFreezeReason;
-    type WeightInfo = ();
+    type WeightInfo = sdk_weights::BalancesWeights;
     type Balance = Balance;
     type DustRemoval = ();
     type ExistentialDeposit = ConstU128<EXISTENTIAL_DEPOSIT>;
@@ -454,14 +463,14 @@ impl pallet_session::Config for Runtime {
 }
 
 /// The runtime version — the first actual version (spec version 1), no production assumption.
-/// The actual spec_version = 7 (Madar Names; before it 6 for D55 Madar Stamp, 5 for D54 `AdmissionCapPerRound` 5→2, 4 for closing N1, and 3 for the ban_key weight in B1). The `upgrade-fixture` feature makes it 8.
+/// The actual spec_version = 9 (B2: no candidacy and no draw entry without a vouch from an approved operator, and the operator's account is created by its first vouch; the two old v1 sale calls removed; before it 8 for the payment proof in the safe sale: lock_sale_v2/complete_sale_v2, with the 2026-10-12 names security fixes in the same upgrade; before it 7 for Madar Names, 6 for D55 Madar Stamp, 5 for D54 `AdmissionCapPerRound` 5→2, 4 for closing N1, and 3 for the ban_key weight in B1). The `upgrade-fixture` feature makes it 10.
 #[cfg(not(feature = "upgrade-fixture"))]
 #[sp_version::runtime_version]
 pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: alloc::borrow::Cow::Borrowed("madar"),
     impl_name: alloc::borrow::Cow::Borrowed("madar-node"),
     authoring_version: 1,
-    spec_version: 7,
+    spec_version: 9,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -475,7 +484,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: alloc::borrow::Cow::Borrowed("madar"),
     impl_name: alloc::borrow::Cow::Borrowed("madar-node"),
     authoring_version: 1,
-    spec_version: 8,
+    spec_version: 10,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -658,7 +667,7 @@ sp_api::impl_runtime_apis! {
             membership_api::challenge()
         }
     }
-
+    #[cfg(feature = "runtime-benchmarks")] impl frame_benchmarking::Benchmark<Block> for Runtime { fn benchmark_metadata(extra: bool) -> (Vec<frame_benchmarking::BenchmarkList>, Vec<frame_support::traits::StorageInfo>) { benchmarks::metadata(extra) } fn dispatch_benchmark(config: frame_benchmarking::BenchmarkConfig) -> Result<Vec<frame_benchmarking::BenchmarkBatch>, alloc::string::String> { benchmarks::dispatch(config) } } // B1 benchmarks only; one line on purpose, see the note at the end of this file.
     impl frame_system_rpc_runtime_api::AccountNonceApi<Block, AccountId, <Runtime as frame_system::Config>::Nonce> for Runtime {
         fn account_nonce(account: AccountId) -> <Runtime as frame_system::Config>::Nonce {
             System::account_nonce(account)
@@ -758,11 +767,11 @@ impl pallet_collective::Config<UpgradeCommitteeInstance> for Runtime {
     type MaxProposals = ConstU32<16>;
     type MaxMembers = ConstU32<3>;
     type DefaultVote = pallet_collective::PrimeDefaultVote;
-    type WeightInfo = ();
+    type WeightInfo = sdk_weights::CollectiveWeights;
     /// **Direct `set_members` is completely disabled:** it accepted any membership size (`MaxMembers` is not enforced
     /// on it), weakening 2-of-3. The membership now changes only through
     /// `madar_upgrade_authority::set_committee_members` (2-of-3 **and** exactly size 3, no duplicates).
-    type SetMembersOrigin = frame_system::EnsureNever<()>;
+    type SetMembersOrigin = CommitteeSetMembersOrigin;
     type MaxProposalWeight = UpgradeCommitteeMaxProposalWeight;
     /// Cancelling a proposal without cost — the same 2-of-3 threshold, no easier path (no reason
     /// to allow cancellation with a weaker origin than the approval itself).
@@ -800,7 +809,7 @@ impl madar_stamp::Config for Runtime {
     type WeightInfo = madar_stamp::weights::ConservativeWeight<Runtime>;
 }
 
-// Madar Names (spec 7): a yearly name bound to its owner's wallet by that wallet's signature, verified by the runtime. Registrars,
+// Madar Names (spec 7; payment proof in the safe sale spec 8): a yearly name bound to its owner's wallet by that wallet's signature, verified by the runtime. Registrars,
 // the reserved list and revocation for proven fraud are decided by the same upgrade committee (2-of-3).
 parameter_types! {
     /// Longest term that can be paid in advance: 10 years.
@@ -1008,3 +1017,22 @@ where
 pub const MIN_FRESH_ENTROPY_BLOCKS: u32 = 16;
 #[cfg(feature = "fast-test-runtime")]
 pub const MIN_FRESH_ENTROPY_BLOCKS: u32 = 4;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// B1 benchmarks (feature `runtime-benchmarks`, never in a production build). Everything is kept at the end of the file,
+// and the `Benchmark` runtime API impl above sits on one line, on purpose: the runtime wasm embeds source line numbers
+// (panic locations), so moving any line above would change the default wasm. With the feature off nothing here exists
+// and the default runtime is byte-identical (B1-2026-10-15).
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Wiring for `madar-node benchmark` (benchmarked pallets, helpers, the session-transition benchmark).
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarks;
+
+/// `pallet_collective::SetMembersOrigin` of the upgrade committee: `EnsureNever` in every real build (membership changes
+/// only through `UpgradeAuthority::set_committee_members`, see the collective config above).
+#[cfg(not(feature = "runtime-benchmarks"))]
+pub type CommitteeSetMembersOrigin = frame_system::EnsureNever<()>;
+/// Benchmark builds only: the SDK `pallet_collective` benchmarks seed members through `set_members(Root)`.
+#[cfg(feature = "runtime-benchmarks")]
+pub type CommitteeSetMembersOrigin = frame_system::EnsureRoot<AccountId>;

@@ -26,7 +26,7 @@ use frame_support::{
     dispatch::DispatchClass,
     parameter_types,
     weights::{
-        constants::{BlockExecutionWeight, ExtrinsicBaseWeight, WEIGHT_REF_TIME_PER_SECOND},
+        constants::{WEIGHT_REF_TIME_PER_MICROS, WEIGHT_REF_TIME_PER_SECOND},
         Weight,
     },
 };
@@ -58,6 +58,17 @@ const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
 const MAX_BLOCK_WEIGHT: Weight =
     Weight::from_parts(WEIGHT_REF_TIME_PER_SECOND.saturating_mul(2), u64::MAX);
 
+/// **B1 (2026-10-15, actual measurement):** the cost of an empty block in MADAR (BABE, the Admission entropy accumulator,
+/// the timestamp, …) = 1,355 µs median (1,546 µs p95, 1,758 µs max; `madar-node benchmark overhead`, WASM, i7-12700KF).
+/// The adopted value 2,750 µs is >= 2× the median. The SDK reference value was 431.6 µs (three times below the actual cost).
+pub const MADAR_BLOCK_EXECUTION_WEIGHT: Weight =
+    Weight::from_parts(2_750 * WEIGHT_REF_TIME_PER_MICROS, 0);
+
+/// **B1 (2026-10-15, actual measurement):** the cost of an empty signed transaction (`remark`) in the full MADAR envelope
+/// = 58.7 µs median (60.4 µs max). The adopted value 120 µs is >= 2× (the SDK value was 108.2 µs = 1.84×).
+pub const MADAR_EXTRINSIC_BASE_WEIGHT: Weight =
+    Weight::from_parts(120 * WEIGHT_REF_TIME_PER_MICROS, 0);
+
 parameter_types! {
     /// Wired through `frame_system::Config::BlockLength` in any real runtime.
     pub MadarBlockLength: BlockLength =
@@ -65,11 +76,11 @@ parameter_types! {
 
     /// Wired through `frame_system::Config::BlockWeights`.
     pub MadarBlockWeights: BlockWeights = BlockWeights::builder()
-        .base_block(BlockExecutionWeight::get())
+        .base_block(MADAR_BLOCK_EXECUTION_WEIGHT)
         .for_class(DispatchClass::all(), |weights| {
             // A real base cost per transaction (decoding + signature verification + ...): without it, it was
-            // zero, so small transactions were not accounted at all. The standard SDK value (placeholder D24).
-            weights.base_extrinsic = ExtrinsicBaseWeight::get();
+            // zero, so small transactions were not accounted at all. B1: measured for MADAR (above).
+            weights.base_extrinsic = MADAR_EXTRINSIC_BASE_WEIGHT;
         })
         .for_class(DispatchClass::Normal, |weights| {
             weights.max_total = Some(NORMAL_DISPATCH_RATIO * MAX_BLOCK_WEIGHT);

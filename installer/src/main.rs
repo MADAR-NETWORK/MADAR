@@ -311,28 +311,6 @@ fn verify_spec(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn b64(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16
-            | (*c.get(1).unwrap_or(&0) as u32) << 8
-            | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            out.push(if i <= c.len() {
-                T[(n >> (18 - 6 * i) & 63) as usize] as char
-            } else {
-                '='
-            });
-        }
-    }
-    out
-}
-
-fn ps_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
 /// `only_existing` (update mode): only updates an existing shortcut that points to this same installation; it does not re-add a shortcut
 /// the user deleted, and does not touch another installation's shortcut.
 /// A folder at the root of C:\ inherits "Authenticated Users: Modify" from Windows, so any other account on the machine could replace
@@ -389,83 +367,333 @@ fn lock_down_permissions(dir: &Path) {
 }
 
 /// Adds "MADAR Node" to Windows "Apps" (HKCU: current user, no admin rights) with an uninstall command.
+/// Written through the Windows registry API itself, not reg.exe: reg.exe started by an installer is a pattern antivirus
+/// behaviour monitors flag, and its writes were found not to stick (the entry kept an old test folder, 2026-10-13).
 fn register_uninstall(dir: &Path, entries: &[Entry]) {
-    let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\MADARNode";
     let app = dir.join("bin").join("madar-app.exe");
-    let size_kb = (entries.iter().map(|e| e.data.len() as u64).sum::<u64>() / 1024).to_string();
-    let values: [(&str, &str, String); 9] = [
-        ("DisplayName", "REG_SZ", "MADAR Node".into()),
-        ("DisplayVersion", "REG_SZ", VERSION.into()),
-        ("Publisher", "REG_SZ", "MADAR NETWORK".into()),
-        (
-            "DisplayIcon",
-            "REG_SZ",
-            dir.join("madar.ico").display().to_string(),
-        ),
-        ("InstallLocation", "REG_SZ", dir.display().to_string()),
+    let size_kb = u32::try_from(entries.iter().map(|e| e.data.len() as u64).sum::<u64>() / 1024)
+        .unwrap_or(u32::MAX);
+    let texts: [(&str, String); 6] = [
+        ("DisplayName", "MADAR Node".into()),
+        ("DisplayVersion", VERSION.into()),
+        ("Publisher", "MADAR NETWORK".into()),
+        ("DisplayIcon", dir.join("madar.ico").display().to_string()),
+        ("InstallLocation", dir.display().to_string()),
         (
             "UninstallString",
-            "REG_SZ",
             format!("\"{}\" uninstall", app.display()),
         ),
-        ("EstimatedSize", "REG_DWORD", size_kb),
-        ("NoModify", "REG_DWORD", "1".into()),
-        ("NoRepair", "REG_DWORD", "1".into()),
     ];
-    for (name, kind, data) in values {
-        let _ = Command::new("reg")
-            .args(["add", key, "/v", name, "/t", kind, "/d", &data, "/f"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    let numbers: [(&str, u32); 3] = [("EstimatedSize", size_kb), ("NoModify", 1), ("NoRepair", 1)];
+    match write_uninstall_key(UNINSTALL_SUBKEY, &texts, &numbers) {
+        Ok(()) => log("uninstall entry written"),
+        Err(e) => log(&format!("uninstall entry not written: {e}")),
     }
 }
 
+const UNINSTALL_SUBKEY: &str = r"SoftwareMicrosoftWindowsCurrentVersionUninstallMADARNode";
+/// HKEY_CURRENT_USER as the API wants it: (HKEY)(ULONG_PTR)(LONG)0x80000001.
+const HKCU: isize = 0x8000_0001u32 as i32 as isize;
+const KEY_WRITE: u32 = 0x2_0006;
+const REG_SZ: u32 = 1;
+const REG_DWORD: u32 = 4;
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegCreateKeyExW(
+        key: isize,
+        sub: *const u16,
+        reserved: u32,
+        class: *const u16,
+        options: u32,
+        sam: u32,
+        security: *const c_void,
+        out: *mut isize,
+        disposition: *mut u32,
+    ) -> i32;
+    fn RegSetValueExW(
+        key: isize,
+        name: *const u16,
+        reserved: u32,
+        kind: u32,
+        data: *const u8,
+        len: u32,
+    ) -> i32;
+    fn RegCloseKey(key: isize) -> i32;
+}
+
+/// Creates (or opens) `subkey` under HKCU and sets every value; the first failing call is reported (Win32 error code).
+fn write_uninstall_key(
+    subkey: &str,
+    texts: &[(&str, String)],
+    numbers: &[(&str, u32)],
+) -> Result<(), String> {
+    let sub = wide(subkey);
+    let mut key: isize = 0;
+    // SAFETY: valid NUL-terminated strings; `key` receives an open handle that is closed below on every path.
+    let r = unsafe {
+        RegCreateKeyExW(
+            HKCU,
+            sub.as_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            KEY_WRITE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    };
+    if r != 0 {
+        return Err(format!("create key: {r}"));
+    }
+    let mut result = Ok(());
+    for (name, value) in texts {
+        let n = wide(name);
+        let v = wide(value);
+        // SAFETY: `v` is NUL-terminated UTF-16 and the length (in bytes) includes the terminator, as REG_SZ wants.
+        let r = unsafe {
+            RegSetValueExW(
+                key,
+                n.as_ptr(),
+                0,
+                REG_SZ,
+                v.as_ptr().cast(),
+                (v.len() * 2) as u32,
+            )
+        };
+        if r != 0 && result.is_ok() {
+            result = Err(format!("{name}: {r}"));
+        }
+    }
+    for (name, value) in numbers {
+        let n = wide(name);
+        let v = value.to_le_bytes();
+        // SAFETY: four bytes for a REG_DWORD.
+        let r = unsafe { RegSetValueExW(key, n.as_ptr(), 0, REG_DWORD, v.as_ptr(), 4) };
+        if r != 0 && result.is_ok() {
+            result = Err(format!("{name}: {r}"));
+        }
+    }
+    // SAFETY: the handle opened above.
+    unsafe { RegCloseKey(key) };
+    result
+}
+
+/// The desktop shortcut through Windows' own Shell Link service (COM IShellLinkW) — no PowerShell, which antivirus
+/// behaviour monitors flag (Bitdefender removed the app on 2026-10-13). `only_existing` (update mode): only a
+/// shortcut that already points to this installation is rewritten.
 fn create_shortcut(
     dir: &Path,
     shortcut_dir: Option<&Path>,
     only_existing: bool,
 ) -> Result<Option<PathBuf>, String> {
     let folder = match shortcut_dir {
-        Some(d) => ps_quote(&d.display().to_string()),
-        None => "[Environment]::GetFolderPath('Desktop')".to_string(),
+        Some(d) => d.to_path_buf(),
+        None => desktop_dir().ok_or("no desktop folder")?,
     };
-    let script = format!(
-        "$d = {folder}; $l = Join-Path $d {name}; $w = New-Object -ComObject WScript.Shell; \
-         if (${only}) {{ if (-not (Test-Path -LiteralPath $l)) {{ return }}; if ($w.CreateShortcut($l).TargetPath -ne {target}) {{ return }} }}; \
-         $s = $w.CreateShortcut($l); \
-         $s.TargetPath = {target}; $s.Arguments = 'start'; $s.WorkingDirectory = {wd}; $s.IconLocation = {icon}; \
-         $s.Description = {desc}; $s.Save(); $l",
-        only = only_existing,
-        name = ps_quote(&format!("{APP_NAME}.lnk")),
-        target = ps_quote(&dir.join("bin").join("madar-app.exe").display().to_string()),
-        wd = ps_quote(&dir.display().to_string()),
-        icon = ps_quote(&format!("{},0", dir.join("madar.ico").display())),
-        desc = ps_quote("MADAR Network node"),
-    );
-    let enc: Vec<u8> = format!("[Console]::OutputEncoding=[Text.Encoding]::UTF8; {script}")
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect();
-    let out = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-EncodedCommand",
-            &b64(&enc),
-        ])
-        .stdin(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let link = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    let link = folder.join(format!("{APP_NAME}.lnk"));
+    let target = dir.join("bin").join("madar-app.exe");
+    if only_existing
+        && !(link.exists()
+            && shell_link_target(&link)
+                .is_some_and(|t| t.eq_ignore_ascii_case(&target.display().to_string())))
+    {
+        return Ok(None);
     }
-    Ok((!link.is_empty()).then(|| PathBuf::from(link)))
+    save_shell_link(
+        &link,
+        &target.display().to_string(),
+        "start",
+        &dir.display().to_string(),
+        &dir.join("madar.ico").display().to_string(),
+        "MADAR Network node",
+    )?;
+    Ok(Some(link))
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    fn SHGetKnownFolderPath(
+        id: *const [u8; 16],
+        flags: u32,
+        token: *mut c_void,
+        path: *mut *mut u16,
+    ) -> i32;
+}
+#[link(name = "ole32")]
+extern "system" {
+    fn CoTaskMemFree(p: *mut c_void);
+    fn CoInitializeEx(reserved: *mut c_void, model: u32) -> i32;
+    fn CoCreateInstance(
+        clsid: *const [u8; 16],
+        outer: *mut c_void,
+        ctx: u32,
+        iid: *const [u8; 16],
+        out: *mut *mut c_void,
+    ) -> i32;
+}
+
+/// A GUID in its in-memory byte order.
+const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> [u8; 16] {
+    let a = d1.to_le_bytes();
+    let b = d2.to_le_bytes();
+    let c = d3.to_le_bytes();
+    [
+        a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d4[0], d4[1], d4[2], d4[3], d4[4], d4[5],
+        d4[6], d4[7],
+    ]
+}
+const CLSID_SHELL_LINK: [u8; 16] = guid(0x0002_1401, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
+const IID_ISHELL_LINK_W: [u8; 16] = guid(0x0002_14F9, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
+const IID_IPERSIST_FILE: [u8; 16] = guid(0x0000_010B, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
+const FOLDERID_DESKTOP: [u8; 16] = guid(
+    0xB4BF_CC3A,
+    0xDB2C,
+    0x424C,
+    [0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41],
+);
+
+/// The user's desktop folder as Windows knows it (also when it was moved, e.g. into OneDrive).
+fn desktop_dir() -> Option<PathBuf> {
+    let mut p: *mut u16 = std::ptr::null_mut();
+    // SAFETY: Windows writes a NUL-terminated string it allocated; we read it once and free it with CoTaskMemFree.
+    unsafe {
+        let ok = SHGetKnownFolderPath(&FOLDERID_DESKTOP, 0, std::ptr::null_mut(), &mut p) == 0
+            && !p.is_null();
+        let out = ok.then(|| PathBuf::from(from_wide_ptr(p)));
+        if !p.is_null() {
+            CoTaskMemFree(p as *mut c_void);
+        }
+        out
+    }
+}
+
+/// SAFETY: `p` points to a NUL-terminated UTF-16 string.
+unsafe fn from_wide_ptr(p: *const u16) -> String {
+    let mut n = 0;
+    while *p.add(n) != 0 {
+        n += 1;
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+}
+
+fn wide_z(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+/// A COM interface pointer: slot `i` of its method table, released once when dropped.
+struct Com(*mut c_void);
+impl Com {
+    /// SAFETY: `self.0` is a live COM interface whose table has more than `i` entries.
+    unsafe fn slot(&self, i: usize) -> *const c_void {
+        *(*(self.0 as *const *const *const c_void)).add(i)
+    }
+}
+impl Drop for Com {
+    fn drop(&mut self) {
+        // SAFETY: slot 2 of every COM interface is Release.
+        unsafe {
+            let release: extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(self.slot(2));
+            release(self.0);
+        }
+    }
+}
+
+/// IShellLinkW and its IPersistFile, on a thread with COM started.
+fn shell_link_objects() -> Result<(Com, Com), String> {
+    // SAFETY: standard COM creation; every pointer is checked before use and released by Com::drop.
+    unsafe {
+        CoInitializeEx(std::ptr::null_mut(), 0x2); // COINIT_APARTMENTTHREADED (S_FALSE when already started is fine)
+        let mut link: *mut c_void = std::ptr::null_mut();
+        let hr = CoCreateInstance(
+            &CLSID_SHELL_LINK,
+            std::ptr::null_mut(),
+            0x1, /* CLSCTX_INPROC_SERVER */
+            &IID_ISHELL_LINK_W,
+            &mut link,
+        );
+        if hr < 0 || link.is_null() {
+            return Err(format!("ShellLink 0x{hr:08x}"));
+        }
+        let link = Com(link);
+        let qi: extern "system" fn(*mut c_void, *const [u8; 16], *mut *mut c_void) -> i32 =
+            std::mem::transmute(link.slot(0));
+        let mut file: *mut c_void = std::ptr::null_mut();
+        let hr = qi(link.0, &IID_IPERSIST_FILE, &mut file);
+        if hr < 0 || file.is_null() {
+            return Err(format!("IPersistFile 0x{hr:08x}"));
+        }
+        Ok((link, Com(file)))
+    }
+}
+
+fn save_shell_link(
+    at: &Path,
+    target: &str,
+    args: &str,
+    workdir: &str,
+    icon: &str,
+    desc: &str,
+) -> Result<(), String> {
+    let (link, file) = shell_link_objects()?;
+    let check = |hr: i32, what: &str| {
+        if hr < 0 {
+            Err(format!("{what} 0x{hr:08x}"))
+        } else {
+            Ok(())
+        }
+    };
+    // SAFETY: IShellLinkW slots 7 SetDescription, 9 SetWorkingDirectory, 11 SetArguments, 17 SetIconLocation,
+    // 20 SetPath; IPersistFile slot 6 Save. Every string is NUL-terminated and outlives its call.
+    unsafe {
+        type SetStr = extern "system" fn(*mut c_void, *const u16) -> i32;
+        let set = |slot: usize, s: &str| -> i32 {
+            let f: SetStr = std::mem::transmute(link.slot(slot));
+            f(link.0, wide_z(s).as_ptr())
+        };
+        check(set(20, target), "SetPath")?;
+        check(set(11, args), "SetArguments")?;
+        check(set(9, workdir), "SetWorkingDirectory")?;
+        check(set(7, desc), "SetDescription")?;
+        let icon_fn: extern "system" fn(*mut c_void, *const u16, i32) -> i32 =
+            std::mem::transmute(link.slot(17));
+        check(icon_fn(link.0, wide_z(icon).as_ptr(), 0), "SetIconLocation")?;
+        let save: extern "system" fn(*mut c_void, *const u16, i32) -> i32 =
+            std::mem::transmute(file.slot(6));
+        check(
+            save(file.0, wide_z(&at.display().to_string()).as_ptr(), 1),
+            "Save",
+        )
+    }
+}
+
+/// The program an existing shortcut opens, if it can be read.
+fn shell_link_target(at: &Path) -> Option<String> {
+    let (link, file) = shell_link_objects().ok()?;
+    // SAFETY: IPersistFile slot 5 Load; IShellLinkW slot 3 GetPath (buffer of 1024 u16, NUL-terminated on success).
+    unsafe {
+        let load: extern "system" fn(*mut c_void, *const u16, u32) -> i32 =
+            std::mem::transmute(file.slot(5));
+        if load(file.0, wide_z(&at.display().to_string()).as_ptr(), 0) < 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; 1024];
+        let get: extern "system" fn(*mut c_void, *mut u16, i32, *mut c_void, u32) -> i32 =
+            std::mem::transmute(link.slot(3));
+        (get(
+            link.0,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+            std::ptr::null_mut(),
+            0x4, /* SLGP_RAWPATH */
+        ) >= 0)
+            .then(|| {
+                String::from_utf16_lossy(
+                    &buf[..buf.iter().position(|&c| c == 0).unwrap_or(buf.len())],
+                )
+            })
+    }
 }
 
 fn install(o: &Opts) -> Result<(PathBuf, Option<PathBuf>), String> {
@@ -546,7 +774,7 @@ fn main() {
                     String::new()
                 },
                 if o.launch {
-                    tr("Your page opens now to create your account.")
+                    tr("Your MADAR page opens now.")
                 } else {
                     String::new()
                 }
@@ -618,5 +846,69 @@ mod tests {
         let mut t = pack(&[("VERSION", b"2.0.0")]);
         t.truncate(t.len() - 2);
         assert!(parse_payload(&t).is_err(), "truncated");
+    }
+}
+
+#[cfg(test)]
+mod lnk_tests {
+    use super::*;
+
+    #[test]
+    fn a_shortcut_is_saved_through_windows_and_read_back_also_in_a_non_ascii_folder() {
+        let dir = std::env::temp_dir().join(format!("madar-lnk-José-日本-{}", std::process::id()));
+        let _ = fs::create_dir_all(dir.join("bin"));
+        let exe = dir.join("bin").join("madar-app.exe");
+        fs::write(&exe, b"x").unwrap();
+        let at = dir.join("test.lnk");
+        save_shell_link(
+            &at,
+            &exe.display().to_string(),
+            "start",
+            &dir.display().to_string(),
+            &dir.join("madar.ico").display().to_string(),
+            "MADAR Network node",
+        )
+        .unwrap();
+        assert_eq!(
+            shell_link_target(&at).as_deref(),
+            Some(exe.display().to_string().as_str())
+        );
+        assert!(desktop_dir().is_some_and(|d| d.is_dir()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn the_uninstall_values_are_written_through_the_registry_api_also_with_non_ascii_paths() {
+        // a throw-away key, never the real MADARNode one
+        let sub = format!(r"Software\MADAR-Test-Uninstall-{}", std::process::id());
+        let path = r"D:\Apps\José-日本\MADAR-Network\bin\madar-app.exe";
+        write_uninstall_key(
+            &sub,
+            &[
+                ("DisplayName", "MADAR Node".into()),
+                ("UninstallString", format!("\"{path}\" uninstall")),
+            ],
+            &[("NoModify", 1)],
+        )
+        .unwrap();
+        let q = |v: &str| {
+            let o = Command::new("reg")
+                .args(["query", &format!(r"HKCU\{sub}"), "/v", v])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        assert!(q("DisplayName").contains("MADAR Node"));
+        assert!(q("NoModify").contains("0x1"));
+        // reg query prints in the console code page, so the non-ASCII part is checked through the API path only
+        assert!(q("UninstallString").contains("uninstall"));
+        let _ = Command::new("reg")
+            .args(["delete", &format!(r"HKCU\{sub}"), "/f"])
+            .output();
     }
 }

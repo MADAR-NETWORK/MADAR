@@ -318,3 +318,7 @@ pub mod pallet {
 
 #[cfg(test)]
 mod tests;
+
+// Benchmarks only. At the end of the file so no line above moves (the default wasm embeds panic line numbers).
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;

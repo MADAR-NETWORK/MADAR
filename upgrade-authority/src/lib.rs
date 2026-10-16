@@ -188,3 +188,15 @@ pub mod pallet {
         }
     }
 }
+
+// Benchmarks only (feature `runtime-benchmarks`). At the end of the file so no line above moves (the default runtime
+// wasm embeds panic line numbers).
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
+
+/// Benchmarks only: the runtime makes `members` the committee and opens `proposals` motions, each voted by every member
+/// (the state `set_committee_members` has to clean up). Not compiled without `runtime-benchmarks`.
+#[cfg(feature = "runtime-benchmarks")]
+pub trait BenchmarkHelper: Config {
+    fn committee_setup(members: &[Self::AccountId], proposals: u32);
+}

@@ -129,6 +129,16 @@ An exception past its review date without renewal **automatically fails the gate
 
 ---
 
+### 7. `proc-macro-error2` 2.0.1 — RUSTSEC-2026-0173 (approved 2026-10-16)
+
+Unmaintained (not a vulnerability). Pulled in **only** with the `runtime-benchmarks` feature (the benchmarking tool,
+off by default): `frame-benchmarking-cli` <- `subxt` <- `subxt-macro` (proc-macro). A build-time macro that does not
+enter any shipped program (the regular `madar-node`, the runtime file, the node app). `cargo tree -p madar-node`
+without the feature does not contain it. Forced by polkadot-sdk (tag polkadot-stable2606-2). Next review:
+2026-12-17, a new SDK release or a Cargo.lock change.
+
+---
+
 ## License exception (licenses, not advisories) — `option-ext` 0.2.0 (MPL-2.0)
 
 Added with the D40 upgrade (2026-09-18) — a different category from the `[advisories]` exceptions above
@@ -201,6 +211,17 @@ gate. No vulnerability is hidden by them (`tracing-subscriber`, `hickory-proto` 
 | `lru` 0.7.8 | RUSTSEC-2026-0253 | `tracing-log` (interest-cache feature) | SDK; none of our code uses it directly |
 | `memmap2` 0.5.10 | RUSTSEC-2026-0186 | `parity-db` 0.4.13 | the optional ParityDB database; the default setting is RocksDB |
 
+### E) Review of 2026-10-16 (three advisories)
+
+- **`wasmtime` 36.0.16 — RUSTSEC-2026-0363** (unbounded Component Model handle tables): the `component-model` feature
+  is **not enabled** in our build (`cargo tree -e features -i wasmtime`: no component* feature), so the affected code is
+  not compiled. Even so, **the lock was upgraded to 36.0.18 (the fixed release)** so the next node build is clean; it
+  reaches nodes with the node update after runtime upgrade 9. The runtime file is not affected (wasmtime is host-only).
+- **`ruzstd` 0.8.3 — RUSTSEC-2026-0344** (decompression bomb): present in `Cargo.lock` only, **not compiled** with any
+  feature (`cargo tree --target all -i ruzstd` does not find it, not even with `runtime-benchmarks`). It belongs with
+  the list in "B) present in `Cargo.lock` only".
+- **`proc-macro-error2` 2.0.1 — RUSTSEC-2026-0173**: exception #7 above.
+
 ### Full closure condition (B8)
 
 Upgrade `polkadot-sdk` to a tag that updates `sp-tracing` (≥ `tracing-subscriber` 0.3.20) and `libp2p` (hickory ≥
@@ -236,3 +257,4 @@ it must be re-evaluated from scratch under the same eligibility conditions befor
 | 2026-09-19 | `deny.toml` aligned with the documented policy: the license gate failed (46 packages) after moving to SDK 2606; added `ISC` (permissive) and package-name-scoped exemptions for 41 `sc-*` packages (GPL-3.0-or-later WITH Classpath-exception-2.0, approved in `node-licensing.md`) and for `webpki-roots` (MPL-2.0, file-level) — the license is not added to the global allow list | Implementation of an existing policy (D42), not a new policy |
 | 2026-09-28 | Periodic re-verification: `cargo audit` + `cargo tree --workspace -e all --target all` — results identical to the 2026-09-19 review (7 vulnerabilities: two compiled with existing mitigation, five lock-only); no newer stable SDK tag (2609 at RC2) | Periodic review (no change to any exception) |
 | 2026-10-04 | `webpki-roots` license exception widened (package-scoped) to also allow `CDLA-Permissive-2.0` — the license of its 0.26 / 1.x releases, pulled in by `ureq` in the new `madar-ops` monitor for https alerts. Fully permissive data license (no copyleft); not added to the global allow list | Adding Madar Ops (owner-approved service) |
+| 2026-10-16 | Three advisories reviewed: wasmtime upgraded to 36.0.18 (the affected feature was never enabled), ruzstd lock-only, and `proc-macro-error2` a new Tier-2 exception (#7, benchmarking tool only) | Owner-delegated review |

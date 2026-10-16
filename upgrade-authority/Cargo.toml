@@ -12,6 +12,7 @@ parity-scale-codec = { version = "3.6.12", features = ["derive"], default-featur
 scale-info = { version = "2.11.3", features = ["derive"], default-features = false }
 frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
 frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
+frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false, optional = true }
 
 [dev-dependencies]
 sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
@@ -29,4 +30,11 @@ std = [
     "scale-info/std",
     "frame-system/std",
     "frame-support/std",
+    "frame-benchmarking?/std",
+]
+## Benchmarks only (FRAME `benchmark pallet`); off by default, never part of a production build.
+runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
 ]

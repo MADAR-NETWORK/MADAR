@@ -200,7 +200,7 @@ pub fn gate_exit(s: &JoinStatus) -> Result<(), String> {
 pub fn gate_register_keys(s: &JoinStatus) -> Result<(), String> {
     match s.phase {
         Phase::Banned => Err("The key is permanently banned.".into()),
-        Phase::NotStarted => Err("The account does not exist on chain yet: run join apply first (solving the puzzle is what creates the account).".into()),
+        Phase::NotStarted => Err("The account does not exist on chain yet: an approved operator vouches for it (join vouch), then run join apply.".into()),
         _ => Ok(()),
     }
 }

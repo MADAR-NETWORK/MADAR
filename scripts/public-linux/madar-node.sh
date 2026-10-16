@@ -21,7 +21,6 @@ P2P="${MADAR_P2P_PORT:-30333}"
 PROM="${MADAR_PROM_PORT:-9615}"
 GENESIS=0xec491025ce422aebac0a5e20fb4c868bb3dacefe56cb051060492ceedd6f5e5c
 BOOT1=/ip4/188.241.241.253/tcp/30333/p2p/12D3KooWDAr7FDtAeUx51zowWytNKeeuQfB5B2cyF4bZmDEp9j9K
-BOOT2=/ip4/103.254.60.222/tcp/30333/p2p/12D3KooWQqcRoYDfHLGrj7kUcNFQHnHvpcgZvKMfU1RuPRqnhuXS
 
 mkdir -p "$DATA"
 
@@ -31,7 +30,7 @@ node_args() {
     local name="$1" listen="/ip4/127.0.0.1/tcp/$P2P" inpeers=8
     if [ "${2:-}" = "help" ]; then listen="/ip4/0.0.0.0/tcp/$P2P"; inpeers=16; fi
     echo --chain "$SPEC" --base-path "$DATA/chain" --name "$name" \
-        --bootnodes "$BOOT1" --bootnodes "$BOOT2" --listen-addr "$listen" \
+        --bootnodes "$BOOT1" --listen-addr "$listen" \
         --rpc-port "$RPC" --rpc-methods safe --rpc-max-connections 10 --prometheus-port "$PROM" \
         --no-telemetry --no-mdns --in-peers "$inpeers" --out-peers 4 \
         --state-pruning 256 --blocks-pruning 4096 --db-cache 64 --trie-cache-size 67108864 \

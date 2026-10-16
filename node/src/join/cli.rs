@@ -23,7 +23,7 @@ pub enum JoinCmd {
     NewAccount(NewAccountArgs),
     /// Account status: candidacy/membership/renewal/removal, session keys, and the next step. Read-only, no passphrase.
     Status(StatusArgs),
-    /// Join (or re-apply): solves the current round's puzzle and submits it. The first transaction creates the account on chain.
+    /// Join (or re-apply): solves the current round's puzzle and submits it. Requires a vouch from an approved operator first (spec 9, B2).
     Apply(TxArgs),
     /// Register session keys: generated inside the local node's Keystore (they never leave it) and registered on chain with a proof of ownership.
     RegisterKeys(TxArgs),
@@ -273,9 +273,24 @@ fn load_account(
     Ok(acct)
 }
 
+/// Is `who` vouched for by an approved operator (`Admission::NodeOperator`)? Since B2 (2026-10-14) the chain refuses a
+/// candidate without it, before the puzzle is even checked.
+fn vouched(t: &HttpRpc, who: &AccountId) -> Result<bool, String> {
+    // the key from the pallet itself, so it cannot drift from the storage definition
+    let key = madar_admission::NodeOperator::<madar_consensus::Runtime>::hashed_key_for(who);
+    let v = t.call(
+        "state_getStorage",
+        serde_json::json!([format!("0x{}", hex::encode(key))]),
+    )?;
+    Ok(!v.is_null())
+}
+
 fn apply(a: TxArgs) -> Result<(), String> {
     let ctx = context(&a.rpc, &a.account_file, a.yes)?;
     status::gate_apply(&ctx.s)?;
+    if !vouched(&ctx.t, &ctx.who)? {
+        return Err("No approved operator has vouched for your node yet, and the network refuses candidacy without it. Send your account address to an approved operator to vouch for it (madar-node join vouch), then try again. Nothing was sent.".into());
+    }
     confirm(&ctx, "Solve the current round's puzzle (may take minutes depending on difficulty) and submit it. No fees.")?;
     let acct = load_account(&a.account_file, &a.passphrase_file, &ctx.who)?;
     submit_solution(&ctx.t, &acct)?;
@@ -378,6 +393,15 @@ fn auto_renew(a: AutoRenewArgs) -> Result<(), String> {
                 "{stamp}: no renewal needed yet (expires at session {:?}).",
                 s.expiry_session
             );
+            Ok(())
+        }
+        Err(_)
+            if a.reapply
+                && status::gate_apply(&s).is_ok()
+                && s.keys_registered
+                && !vouched(&t, &acct.id())? =>
+        {
+            println!("{stamp}: not a member now and not vouched by an approved operator — not applying until an operator vouches for it (madar-node join vouch).");
             Ok(())
         }
         Err(_) if a.reapply && status::gate_apply(&s).is_ok() && s.keys_registered => {

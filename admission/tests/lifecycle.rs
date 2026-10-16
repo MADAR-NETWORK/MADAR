@@ -94,6 +94,7 @@ fn a_valid_solution_makes_the_account_a_candidate_and_only_the_rotation_admits_i
 fn an_insufficient_solution_is_rejected() {
     new_test_ext().execute_with(|| {
         let who = account(2);
+        ensure_vouched(&who);
         let seed = current_round_seed();
         let bad = (0u64..)
             .find(|n| !A::solution_meets_difficulty(&who, &seed, *n))
@@ -107,10 +108,32 @@ fn an_insufficient_solution_is_rejected() {
     });
 }
 
+/// B2 (2026-10-14): without a vouch from an approved operator the candidacy is refused at once (before Argon2), so it never enters the pool or crowds anyone out.
+#[test]
+fn an_unvouched_account_cannot_become_a_candidate() {
+    new_test_ext().execute_with(|| {
+        let who = account(6);
+        let nonce = find_valid_nonce(&who, &current_round_seed());
+        let r = Admission::submit_admission_solution(RuntimeOrigin::signed(who.clone()), nonce);
+        assert_eq!(
+            r.unwrap_err().error,
+            Error::<TestRuntime>::NodeNotVouched.into()
+        );
+        assert!(A::candidates().is_empty());
+        ensure_vouched(&who);
+        assert!(
+            Admission::submit_admission_solution(RuntimeOrigin::signed(who), nonce).is_ok(),
+            "once vouched, the same solution is accepted"
+        );
+    });
+}
+
 #[test]
 fn a_solution_cannot_be_transferred_to_a_different_identity() {
     new_test_ext().execute_with(|| {
         let (a, b) = (account(3), account(4));
+        ensure_vouched(&a);
+        ensure_vouched(&b);
         let seed = current_round_seed();
         let nonce = (0u64..)
             .find(|n| {

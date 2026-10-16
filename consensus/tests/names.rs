@@ -169,17 +169,44 @@ fn only_an_approved_registrar_is_onboarded_and_registers_for_the_signing_wallet(
     });
 }
 
+/// spec 9: the two v1 safe-sale calls are gone from the runtime (indices 6 and 7 of Names). Their bytes no longer
+/// decode as a call, so nobody can submit them; the v2 calls keep their indices.
 #[test]
-fn safe_sale_runs_through_the_real_pipeline_for_the_registrar_only() {
+fn the_v1_safe_sale_calls_no_longer_exist() {
+    use parity_scale_codec::{Decode, Encode};
+    let v2 = RuntimeCall::Names(madar_names::Call::complete_sale_v2 {
+        name: nm("ahmad"),
+        payment_ref: sp_runtime::BoundedVec::try_from(b"base:0x00".to_vec()).unwrap(),
+    })
+    .encode();
+    let pallet = v2[0];
+    for gone in [6u8, 7] {
+        let mut raw = vec![pallet, gone];
+        raw.extend_from_slice(&nm("ahmad").encode());
+        assert!(
+            RuntimeCall::decode(&mut &raw[..]).is_err(),
+            "call index {gone} of Names must be gone"
+        );
+    }
+    assert!(
+        RuntimeCall::decode(&mut &v2[..]).is_ok(),
+        "the v2 completion still decodes"
+    );
+}
+
+/// spec 8: the v2 safe sale (exact amount + rail in the lock, payment reference to complete) through the real pipeline;
+/// only the registrar may submit it, the event carries everything an auditor needs, and a v2 lock refuses the old completion.
+#[test]
+fn v2_safe_sale_records_the_payment_proof_through_the_real_pipeline() {
     new_test_ext(&[]).execute_with(|| {
         start_block();
         let now = 1_790_000_000_000u64;
-        let (pair, reg) = signer(92);
+        let (pair, reg) = signer(94);
         frame_support::assert_ok!(madar_names::Pallet::<Runtime>::add_registrar(
             Committee::Members(2, 3).into(),
             reg.clone()
         ));
-        let (p, _) = evm_proof(5, &register_message(b"ahmad"));
+        let (p, seller) = evm_proof(5, &register_message(b"ahmad"));
         assert!(
             Executive::apply_extrinsic(signed(&pair, &reg, register_call("ahmad", p), 0))
                 .unwrap()
@@ -192,17 +219,19 @@ fn safe_sale_runs_through_the_real_pipeline_for_the_registrar_only() {
             &madar_names::sale_message(b"ahmad", n, 2_500, &pay_to, now + 86_400_000),
         );
         let (bp, buyer) = evm_proof(6, &madar_names::buy_message(b"ahmad", n, 2_500));
-        let lock = RuntimeCall::Names(madar_names::Call::lock_sale {
+        let lock = RuntimeCall::Names(madar_names::Call::lock_sale_v2 {
             name: nm("ahmad"),
             seller_proof: sp,
             price_cents: 2_500,
-            pay_to: sp_runtime::BoundedVec::try_from(pay_to).unwrap(),
+            pay_to: sp_runtime::BoundedVec::try_from(pay_to.clone()).unwrap(),
             offer_until: now + 86_400_000,
             buyer_proof: bp,
             lock_until: now + 50 * 60_000,
+            pay_amount: 25_004_200,
+            rail: 3,
         });
         // a stranger's account cannot even submit it
-        let (spair, stranger) = signer(93);
+        let (spair, stranger) = signer(95);
         let r = Executive::apply_extrinsic(signed(&spair, &stranger, lock.clone(), 0));
         assert_eq!(
             r.err(),
@@ -213,10 +242,42 @@ fn safe_sale_runs_through_the_real_pipeline_for_the_registrar_only() {
         assert!(Executive::apply_extrinsic(signed(&pair, &reg, lock, 1))
             .unwrap()
             .is_ok());
-        let done = RuntimeCall::Names(madar_names::Call::complete_sale { name: nm("ahmad") });
+        assert_eq!(
+            madar_names::LockTerms::<Runtime>::get(nm("ahmad")),
+            Some(madar_names::SaleTerms {
+                rail: 3,
+                pay_amount: 25_004_200
+            })
+        );
+        assert_eq!(Names::<Runtime>::get(nm("ahmad")).unwrap().owner, seller);
+        let payment_ref =
+            b"arbitrum:0x2222222222222222222222222222222222222222222222222222222222222222".to_vec();
+        let done = RuntimeCall::Names(madar_names::Call::complete_sale_v2 {
+            name: nm("ahmad"),
+            payment_ref: sp_runtime::BoundedVec::try_from(payment_ref.clone()).unwrap(),
+        });
         assert!(Executive::apply_extrinsic(signed(&pair, &reg, done, 2))
             .unwrap()
             .is_ok());
-        assert_eq!(Names::<Runtime>::get(nm("ahmad")).unwrap().owner, buyer);
+        assert_eq!(
+            Names::<Runtime>::get(nm("ahmad")).unwrap().owner,
+            buyer.clone()
+        );
+        let want = madar_consensus::RuntimeEvent::Names(madar_names::Event::SaleCompletedV2 {
+            name: nm("ahmad"),
+            from: seller,
+            to: buyer,
+            price_cents: 2_500,
+            pay_to: sp_runtime::BoundedVec::try_from(pay_to).unwrap(),
+            rail: 3,
+            amount: 25_004_200,
+            payment_ref: sp_runtime::BoundedVec::try_from(payment_ref).unwrap(),
+        });
+        assert!(
+            frame_system::Pallet::<Runtime>::events()
+                .iter()
+                .any(|e| e.event == want),
+            "SaleCompletedV2 with the payment proof"
+        );
     });
 }

@@ -18,8 +18,13 @@
 //! sale terms), and the buyer signs an acceptance at the same price. When "Buy" is pressed the name is locked for the buyer
 //! for at most 60 minutes, during which the seller cannot cancel the offer or sell to someone else. The buyer pays the seller
 //! directly (and the fee to MADAR), then the registrar completes the transfer once the payment arrives. If it does not arrive
-//! within the window the lock simply lapses with no action needed. Every offer is bound to a number (nonce) that increases with
-//! every owner change or cancellation, so an old signature cannot be reused.
+//! within the window the lock simply lapses with no action needed. Every offer is bound to a number (nonce) that increases with every owner change or cancellation, so an old signature cannot be reused.
+//!
+//! **Payment proof on chain (spec 8):** `lock_sale_v2` records in the lock and in the `SaleLockedV2` event the exact expected amount
+//! (micro units, 6 decimals) and the payment network (rail), and `complete_sale_v2` moves the name only with the payment reference
+//! (`<chain>:<tx hash>`) from the lock's network, and emits `SaleCompletedV2` with all of it; so anyone can match every completed sale with
+//! the payment chain. One reference cannot complete two sales. Since spec 9: the two old calls `lock_sale` (6) and `complete_sale` (7)
+//! are removed (they were disabled since spec 8); their indices are never reused, and storage is unchanged. The safe sale is v2 only.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
@@ -64,6 +69,78 @@ pub struct SaleLock {
     /// The price in US cents, as signed by both parties.
     pub price_cents: u64,
     pub pay_to: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<MAX_PAY_TO>>,
+}
+
+/// Maximum length of the payment reference `<chain>:<tx hash>`.
+pub const MAX_PAYMENT_REF: u32 = 160;
+/// Number of known payment networks (the same order as the registrar service's rail list):
+/// 0 solana_usdc, 1 solana_usdt, 2 base_usdc, 3 arbitrum_usdc, 4 arbitrum_usdt.
+pub const RAILS: u8 = 5;
+/// Micro units per cent (stablecoins with 6 decimals).
+pub const MICRO_PER_CENT: u64 = 10_000;
+/// The exact amount = the signed price + a small increment that identifies the payment (less than 0.10 dollars).
+pub const MAX_UNIQUE_MICRO: u64 = 100_000;
+
+pub type PaymentRef =
+    frame_support::BoundedVec<u8, frame_support::traits::ConstU32<MAX_PAYMENT_REF>>;
+
+/// The payment terms recorded with a v2 lock — separate storage keyed by the name, so no migration of v1 locks existing at upgrade time.
+#[derive(Encode, Decode, Clone, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen)]
+pub struct SaleTerms {
+    /// 0 solana_usdc, 1 solana_usdt, 2 base_usdc, 3 arbitrum_usdc, 4 arbitrum_usdt.
+    pub rail: u8,
+    /// The exact amount the buyer pays the seller (micro units, 6 decimals).
+    pub pay_amount: u64,
+}
+
+/// The payment chain of every rail, as written at the start of the payment reference.
+pub fn rail_chain(rail: u8) -> Option<&'static [u8]> {
+    match rail {
+        0 | 1 => Some(b"solana"),
+        2 => Some(b"base"),
+        3 | 4 => Some(b"arbitrum"),
+        _ => None,
+    }
+}
+
+/// Does the network fit the seller's receiving address? EVM addresses start with `0x`, the others are Solana.
+pub fn rail_fits_pay_to(rail: u8, pay_to: &[u8]) -> bool {
+    let evm = pay_to.starts_with(b"0x");
+    match rail {
+        0 | 1 => !evm,
+        2..=4 => evm,
+        _ => false,
+    }
+}
+
+/// Is the exact amount within [price, price + 0.10 dollars)? The registrar cannot record an amount lower than what both parties signed.
+pub fn amount_fits_price(pay_amount: u64, price_cents: u64) -> bool {
+    match price_cents.checked_mul(MICRO_PER_CENT) {
+        Some(base) => pay_amount >= base && pay_amount - base < MAX_UNIQUE_MICRO,
+        None => false,
+    }
+}
+
+const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/// A valid payment reference for the lock's network? `base:0x<64 lowercase hex>`, `arbitrum:0x<64 lowercase hex>`, `solana:<base58 signature, 32 to 88 characters>`.
+/// Lowercase is mandatory for EVM so the same reference cannot repeat in another form.
+pub fn valid_payment_ref(rail: u8, r: &[u8]) -> bool {
+    let Some(chain) = rail_chain(rail) else {
+        return false;
+    };
+    let Some(rest) = r.strip_prefix(chain).and_then(|x| x.strip_prefix(b":")) else {
+        return false;
+    };
+    if chain == b"solana" {
+        (32..=88).contains(&rest.len()) && rest.iter().all(|c| BASE58.contains(c))
+    } else {
+        rest.len() == 66
+            && rest.starts_with(b"0x")
+            && rest[2..]
+                .iter()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+    }
 }
 
 fn push_u64(m: &mut Vec<u8>, v: u64) {
@@ -194,6 +271,15 @@ pub mod pallet {
     #[pallet::storage]
     pub type Locks<T: Config> = StorageMap<_, Blake2_128Concat, NameOf, SaleLock, OptionQuery>;
 
+    /// (spec 8) Payment terms of a v2 lock (the exact amount and the network) next to `Locks`. Absent = a v1 lock.
+    #[pallet::storage]
+    pub type LockTerms<T: Config> = StorageMap<_, Blake2_128Concat, NameOf, SaleTerms, OptionQuery>;
+
+    /// (spec 8) Used payment references: blake2_256(reference) → the name. One payment cannot complete two sales.
+    #[pallet::storage]
+    pub type UsedPaymentRefs<T: Config> =
+        StorageMap<_, Blake2_128Concat, [u8; 32], NameOf, OptionQuery>;
+
     #[pallet::storage]
     pub type Registrars<T: Config> =
         StorageValue<_, BoundedVec<T::AccountId, T::MaxRegistrars>, ValueQuery>;
@@ -244,6 +330,27 @@ pub mod pallet {
         RegistrarRemoved {
             who: T::AccountId,
         },
+        /// (spec 8) The name was locked for a buyer until `until`, with the seller's wallet, the exact expected amount (micro units) and the payment network.
+        SaleLockedV2 {
+            name: NameOf,
+            buyer: Wallet,
+            price_cents: u64,
+            until: u64,
+            pay_to: BoundedVec<u8, ConstU32<MAX_PAY_TO>>,
+            rail: u8,
+            amount: u64,
+        },
+        /// (spec 8) The name moved after a payment anyone can verify: `payment_ref` = `<chain>:<tx hash>`.
+        SaleCompletedV2 {
+            name: NameOf,
+            from: Wallet,
+            to: Wallet,
+            price_cents: u64,
+            pay_to: BoundedVec<u8, ConstU32<MAX_PAY_TO>>,
+            rail: u8,
+            amount: u64,
+            payment_ref: PaymentRef,
+        },
     }
 
     #[pallet::error]
@@ -272,6 +379,23 @@ pub mod pallet {
         BadLock,
         /// The price must be greater than zero.
         BadPrice,
+        /// Unknown payment network, or one that does not fit the seller's receiving address (EVM or Solana).
+        BadRail,
+        /// The exact amount must be between the signed price and the price + 0.10 dollars.
+        BadAmount,
+        /// The payment reference is not a valid `<chain>:<tx hash>` for the lock's network.
+        BadPaymentRef,
+        /// The payment reference was used for an earlier sale.
+        PaymentRefUsed,
+        /// A v2 lock completes only with the payment reference (`complete_sale_v2`).
+        PaymentRefRequired,
+        /// `complete_sale_v2` needs a v2 lock that holds the amount and the network.
+        NotV2Lock,
+        /// (spec 8) Re-registering a name for the same owner cannot shorten its paid term.
+        ExpiryShortened,
+        /// (spec 8) The old `lock_sale`/`complete_sale` were disabled, and removed in spec 9. The error stays so the indices
+        /// of the errors after it do not change.
+        V1SaleRemoved,
     }
 
     #[pallet::call]
@@ -300,7 +424,11 @@ pub mod pallet {
             let owner =
                 verify_proof(&proof, &register_message(&name)).ok_or(Error::<T>::InvalidProof)?;
             let registered = match Names::<T>::get(&name) {
-                Some(r) if r.owner == owner => r.registered,
+                // Same owner: extension only. The registrar cannot shorten a paid term and then take the name after it ends (security 2026-10-12).
+                Some(r) if r.owner == owner => {
+                    ensure!(expires >= r.expires, Error::<T>::ExpiryShortened);
+                    r.registered
+                }
                 Some(r) if r.expires.saturating_add(GRACE_MS) > now => {
                     return Err(Error::<T>::NameTaken.into())
                 }
@@ -399,7 +527,7 @@ pub mod pallet {
         /// Emergency tool: revokes a registered name for proven fraud (2-of-3 committee only). The reason is recorded publicly,
         /// and the name is added to the reserved list so it cannot be registered again without a new committee decision.
         #[pallet::call_index(5)]
-        #[pallet::weight(T::WeightInfo::admin())]
+        #[pallet::weight(T::WeightInfo::revoke())]
         pub fn revoke(
             origin: OriginFor<T>,
             name: NameOf,
@@ -414,88 +542,6 @@ pub mod pallet {
                 name,
                 owner: r.owner,
                 reason,
-            });
-            Ok(())
-        }
-
-        /// Safe sale: locks the name for the buyer until `lock_until` (60 minutes at most). Verifies the current owner's offer
-        /// (price, receiving wallet, validity, offer number) and the buyer's acceptance at the same price.
-        #[pallet::call_index(6)]
-        #[pallet::weight(T::WeightInfo::sale())]
-        #[allow(clippy::too_many_arguments)]
-        pub fn lock_sale(
-            origin: OriginFor<T>,
-            name: NameOf,
-            seller_proof: WalletProof,
-            price_cents: u64,
-            pay_to: BoundedVec<u8, ConstU32<MAX_PAY_TO>>,
-            offer_until: u64,
-            buyer_proof: WalletProof,
-            lock_until: u64,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
-            ensure!(price_cents > 0, Error::<T>::BadPrice);
-            let now = T::Time::now().as_millis() as u64;
-            let r = Names::<T>::get(&name).ok_or(Error::<T>::NotRegistered)?;
-            ensure!(r.expires > now, Error::<T>::NotRegistered);
-            ensure!(offer_until >= now, Error::<T>::BadOffer);
-            ensure!(
-                lock_until > now && lock_until <= now.saturating_add(MAX_LOCK_MS),
-                Error::<T>::BadLock
-            );
-            ensure!(!Self::locked(&name, now), Error::<T>::SaleLocked);
-            let nonce = SaleNonce::<T>::get(&name);
-            let seller = verify_proof(
-                &seller_proof,
-                &sale_message(&name, nonce, price_cents, &pay_to, offer_until),
-            )
-            .ok_or(Error::<T>::InvalidProof)?;
-            ensure!(seller == r.owner, Error::<T>::BadOffer);
-            let buyer = verify_proof(&buyer_proof, &buy_message(&name, nonce, price_cents))
-                .ok_or(Error::<T>::InvalidProof)?;
-            ensure!(buyer != r.owner, Error::<T>::BadOffer);
-            Locks::<T>::insert(
-                &name,
-                SaleLock {
-                    buyer: buyer.clone(),
-                    until: lock_until,
-                    price_cents,
-                    pay_to,
-                },
-            );
-            Self::deposit_event(Event::SaleLocked {
-                name,
-                buyer,
-                price_cents,
-                until: lock_until,
-            });
-            Ok(())
-        }
-
-        /// Completes the sale after the payment arrives: moves the name to the buyer it was locked for (the paid term stays as is).
-        #[pallet::call_index(7)]
-        #[pallet::weight(T::WeightInfo::renew())]
-        pub fn complete_sale(origin: OriginFor<T>, name: NameOf) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
-            let now = T::Time::now().as_millis() as u64;
-            let lock = Locks::<T>::get(&name)
-                .filter(|l| l.until >= now)
-                .ok_or(Error::<T>::NoSaleLock)?;
-            let from = Names::<T>::try_mutate(&name, |r| {
-                let r = r.as_mut().ok_or(Error::<T>::NotRegistered)?;
-                let from = core::mem::replace(&mut r.owner, lock.buyer.clone());
-                r.registered = now;
-                r.registrar = who;
-                Ok::<_, DispatchError>(from)
-            })?;
-            Self::new_owner(&name);
-            Self::deposit_event(Event::Sold {
-                name,
-                from,
-                to: lock.buyer,
-                price_cents: lock.price_cents,
             });
             Ok(())
         }
@@ -519,7 +565,108 @@ pub mod pallet {
             ensure!(owner == r.owner, Error::<T>::BadOffer);
             SaleNonce::<T>::insert(&name, nonce.wrapping_add(1));
             Locks::<T>::remove(&name);
+            LockTerms::<T>::remove(&name);
             Self::deposit_event(Event::OfferCancelled { name });
+            Ok(())
+        }
+
+        /// (spec 8) Like `lock_sale` with the exact amount the buyer will pay the seller (`pay_amount`, micro units with 6 decimals)
+        /// and the payment network (`rail`: 0 solana_usdc, 1 solana_usdt, 2 base_usdc, 3 arbitrum_usdc, 4 arbitrum_usdt).
+        /// The amount is within [signed price, price + 0.10), and the network fits the receiving address; both are in the lock and in `SaleLockedV2`.
+        #[pallet::call_index(9)]
+        #[pallet::weight(T::WeightInfo::sale_v2())]
+        #[allow(clippy::too_many_arguments)]
+        pub fn lock_sale_v2(
+            origin: OriginFor<T>,
+            name: NameOf,
+            seller_proof: WalletProof,
+            price_cents: u64,
+            pay_to: BoundedVec<u8, ConstU32<MAX_PAY_TO>>,
+            offer_until: u64,
+            buyer_proof: WalletProof,
+            lock_until: u64,
+            pay_amount: u64,
+            rail: u8,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
+            ensure!(
+                rail < RAILS && rail_fits_pay_to(rail, &pay_to),
+                Error::<T>::BadRail
+            );
+            ensure!(
+                amount_fits_price(pay_amount, price_cents),
+                Error::<T>::BadAmount
+            );
+            let buyer = Self::do_lock(
+                &who,
+                &name,
+                seller_proof,
+                price_cents,
+                &pay_to,
+                offer_until,
+                buyer_proof,
+                lock_until,
+            )?;
+            Locks::<T>::insert(
+                &name,
+                SaleLock {
+                    buyer: buyer.clone(),
+                    until: lock_until,
+                    price_cents,
+                    pay_to: pay_to.clone(),
+                },
+            );
+            LockTerms::<T>::insert(&name, SaleTerms { rail, pay_amount });
+            Self::deposit_event(Event::SaleLockedV2 {
+                name,
+                buyer,
+                price_cents,
+                until: lock_until,
+                pay_to,
+                rail,
+                amount: pay_amount,
+            });
+            Ok(())
+        }
+
+        /// (spec 8) Completes a v2 lock sale with the payment reference `<chain>:<tx hash>` (like `base:0x…` or `solana:<signature>`) from the lock's
+        /// network. The reference is stored so it cannot complete another sale, and `SaleCompletedV2` is emitted with the amount, the network and the reference.
+        #[pallet::call_index(10)]
+        #[pallet::weight(T::WeightInfo::complete_v2())]
+        pub fn complete_sale_v2(
+            origin: OriginFor<T>,
+            name: NameOf,
+            payment_ref: PaymentRef,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(Self::is_registrar(&who), Error::<T>::NotRegistrar);
+            let now = T::Time::now().as_millis() as u64;
+            let lock = Locks::<T>::get(&name)
+                .filter(|l| l.until >= now)
+                .ok_or(Error::<T>::NoSaleLock)?;
+            let terms = LockTerms::<T>::get(&name).ok_or(Error::<T>::NotV2Lock)?;
+            ensure!(
+                valid_payment_ref(terms.rail, &payment_ref),
+                Error::<T>::BadPaymentRef
+            );
+            let ref_key = sp_io::hashing::blake2_256(&payment_ref);
+            ensure!(
+                !UsedPaymentRefs::<T>::contains_key(ref_key),
+                Error::<T>::PaymentRefUsed
+            );
+            let from = Self::move_name(&who, &name, &lock, now)?;
+            UsedPaymentRefs::<T>::insert(ref_key, name.clone());
+            Self::deposit_event(Event::SaleCompletedV2 {
+                name,
+                from,
+                to: lock.buyer,
+                price_cents: lock.price_cents,
+                pay_to: lock.pay_to,
+                rail: terms.rail,
+                amount: terms.pay_amount,
+                payment_ref,
+            });
             Ok(())
         }
     }
@@ -538,9 +685,68 @@ pub mod pallet {
         fn new_owner(name: &NameOf) {
             SaleNonce::<T>::mutate(name, |n| *n = n.wrapping_add(1));
             Locks::<T>::remove(name);
+            LockTerms::<T>::remove(name);
+        }
+
+        /// Lock checks shared by v1 and v2: the registrar, the price, the name is active, the window, the current owner's offer and the buyer's acceptance.
+        #[allow(clippy::too_many_arguments)]
+        fn do_lock(
+            who: &T::AccountId,
+            name: &NameOf,
+            seller_proof: WalletProof,
+            price_cents: u64,
+            pay_to: &[u8],
+            offer_until: u64,
+            buyer_proof: WalletProof,
+            lock_until: u64,
+        ) -> Result<Wallet, DispatchError> {
+            ensure!(Self::is_registrar(who), Error::<T>::NotRegistrar);
+            ensure!(price_cents > 0, Error::<T>::BadPrice);
+            let now = T::Time::now().as_millis() as u64;
+            let r = Names::<T>::get(name).ok_or(Error::<T>::NotRegistered)?;
+            ensure!(r.expires > now, Error::<T>::NotRegistered);
+            ensure!(offer_until >= now, Error::<T>::BadOffer);
+            ensure!(
+                lock_until > now && lock_until <= now.saturating_add(MAX_LOCK_MS),
+                Error::<T>::BadLock
+            );
+            ensure!(!Self::locked(name, now), Error::<T>::SaleLocked);
+            let nonce = SaleNonce::<T>::get(name);
+            let seller = verify_proof(
+                &seller_proof,
+                &sale_message(name, nonce, price_cents, pay_to, offer_until),
+            )
+            .ok_or(Error::<T>::InvalidProof)?;
+            ensure!(seller == r.owner, Error::<T>::BadOffer);
+            let buyer = verify_proof(&buyer_proof, &buy_message(name, nonce, price_cents))
+                .ok_or(Error::<T>::InvalidProof)?;
+            ensure!(buyer != r.owner, Error::<T>::BadOffer);
+            Ok(buyer)
+        }
+
+        /// Moves the name to the buyer it was locked for (the term is unchanged) and drops every offer and lock. Returns the previous owner.
+        fn move_name(
+            who: &T::AccountId,
+            name: &NameOf,
+            lock: &SaleLock,
+            now: u64,
+        ) -> Result<Wallet, DispatchError> {
+            let from = Names::<T>::try_mutate(name, |r| {
+                let r = r.as_mut().ok_or(Error::<T>::NotRegistered)?;
+                let from = core::mem::replace(&mut r.owner, lock.buyer.clone());
+                r.registered = now;
+                r.registrar = who.clone();
+                Ok::<_, DispatchError>(from)
+            })?;
+            Self::new_owner(name);
+            Ok(from)
         }
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+// Benchmarks only. At the end of the file so no line above moves (the default wasm embeds panic line numbers).
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;

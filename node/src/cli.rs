@@ -37,6 +37,11 @@ pub enum Subcommand {
     /// Db meta columns information.
     ChainInfo(sc_cli::ChainInfoCmd),
 
+    /// FRAME benchmarks (pallet, overhead, storage, machine) — only in a `runtime-benchmarks` build, never in production.
+    #[cfg(feature = "runtime-benchmarks")]
+    #[command(subcommand)]
+    Benchmark(frame_benchmarking_cli::BenchmarkCmd),
+
     /// Operator onboarding: account, candidacy, session keys, membership status, renewal, exit (`madar-node join --help`).
     #[command(subcommand)]
     Join(crate::join::JoinCmd),

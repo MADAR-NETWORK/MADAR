@@ -75,7 +75,6 @@ If you prefer to manage the process yourself, the essential flags are:
   --chain madar-spec.json \
   --name YOUR_NAME \
   --bootnodes /ip4/188.241.241.253/tcp/30333/p2p/12D3KooWDAr7FDtAeUx51zowWytNKeeuQfB5B2cyF4bZmDEp9j9K \
-  --bootnodes /ip4/103.254.60.222/tcp/30333/p2p/12D3KooWQqcRoYDfHLGrj7kUcNFQHnHvpcgZvKMfU1RuPRqnhuXS \
   --rpc-methods safe
 ```
 

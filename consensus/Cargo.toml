@@ -45,6 +45,9 @@ frame-executive = { git = "https://github.com/paritytech/polkadot-sdk.git", tag 
 frame-system-rpc-runtime-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
 sp-keyring = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+# Benchmarks only (feature `runtime-benchmarks`, off by default).
+frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false, optional = true }
+frame-system-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false, optional = true }
 
 [dev-dependencies]
 finality-grandpa = { version = "0.16", features = ["derive-codec"] }
@@ -101,4 +104,26 @@ std = [
     "sp-keyring/std",
     "serde_json/std",
     "substrate-wasm-builder",
+    "frame-benchmarking?/std",
+    "frame-system-benchmarking?/std",
+]
+## Benchmarks only: FRAME benchmark runtime API + `benchmarking.rs` of every MADAR pallet. Off by default; a production
+## build never enables it (the default runtime wasm is byte-identical with or without this feature declared).
+runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
+    "frame-system-benchmarking/runtime-benchmarks",
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+    "sp-runtime/runtime-benchmarks",
+    "sp-staking/runtime-benchmarks",
+    "pallet-babe/runtime-benchmarks",
+    "pallet-balances/runtime-benchmarks",
+    "pallet-grandpa/runtime-benchmarks",
+    "pallet-session/runtime-benchmarks",
+    "pallet-timestamp/runtime-benchmarks",
+    "pallet-collective/runtime-benchmarks",
+    "madar-admission/runtime-benchmarks",
+    "madar-names/runtime-benchmarks",
+    "madar-stamp/runtime-benchmarks",
+    "madar-upgrade-authority/runtime-benchmarks",
 ]

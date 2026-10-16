@@ -423,6 +423,13 @@ pub mod pallet {
                 return Ok(().into());
             }
 
+            // B2 (2026-10-14): a new candidate must already be vouched for by an approved operator. Without this, free
+            // unvouched accounts could fill the pool with better-ranked outputs and push vouched candidates out (the pool
+            // keeps the best ranks). Cheap read, before Argon2. Renewals of current members (above) are not affected.
+            if !NodeOperator::<T>::contains_key(&who) {
+                return Err(early_reject(Error::<T>::NodeNotVouched));
+            }
+
             let mut candidates: Pool<T> = match Round::<T>::get() {
                 Some((seed, candidates)) if seed == round_seed => candidates,
                 // An older round that has not closed yet because the draw queue is full: we do not replace it (accepted candidacies would be lost) nor open
@@ -752,7 +759,9 @@ pub mod pallet {
             <frame_support::sp_runtime::traits::BlakeTwo256 as frame_support::sp_runtime::traits::Hash>::hash(&input).0
         }
 
-        fn set_validators_with_fresh_terms(validators: BoundedVec<T::AccountId, T::MaxValidators>) {
+        pub(crate) fn set_validators_with_fresh_terms(
+            validators: BoundedVec<T::AccountId, T::MaxValidators>,
+        ) {
             let valid_until =
                 CurrentSession::<T>::get().saturating_add(T::MembershipTermSessions::get());
             for old in Validators::<T>::get() {
@@ -970,27 +979,58 @@ pub mod pallet {
             }
             Pending::<T>::put(BoundedVec::truncate_from(still_waiting));
 
+            // live seats per operator before the draw (same attribution as the cap check below), so the draw itself skips
+            // candidates whose operator has no room left — such a winner would be dropped and waste a round seat
+            let mut room_used: alloc::collections::BTreeMap<T::AccountId, u32> = Default::default();
+            for v in &staying {
+                let op = match NodeOperator::<T>::get(v) {
+                    Some(op) => Some(op),
+                    None if ApprovedOperators::<T>::contains_key(v) => Some(v.clone()),
+                    None => None,
+                };
+                if let Some(op) = op {
+                    *room_used.entry(op).or_insert(0) += 1;
+                }
+            }
             let mut winners: Vec<T::AccountId> = Vec::new();
             for (_, _, candidates) in ready {
                 let seed = Self::draw_seed();
-                let mut eligible: Vec<([u8; 32], T::AccountId)> = candidates
-                    .into_iter()
-                    .map(|(c, _)| c)
-                    .filter(|c| {
-                        !BannedKeys::<T>::contains_key(c)
-                            && !previous_set.contains(c)
-                            && !winners.contains(c)
-                            && T::HasSessionKeys::contains(c)
-                    })
-                    .map(|c| (Self::draw_key(&seed, &c), c))
-                    .collect();
+                // B2 (2026-10-14): only candidates an approved operator vouches for enter the draw. Before, the draw took
+                // the round's winners first and dropped the unvouched ones after, so free unvouched candidates could use
+                // up every slot of a round and keep vouched ones out. Each skipped candidate still gets its explicit event.
+                let mut eligible: Vec<([u8; 32], T::AccountId, T::AccountId)> = Vec::new();
+                for c in candidates.into_iter().map(|(c, _)| c) {
+                    if BannedKeys::<T>::contains_key(&c)
+                        || previous_set.contains(&c)
+                        || winners.contains(&c)
+                        || !T::HasSessionKeys::contains(&c)
+                    {
+                        continue;
+                    }
+                    let Some(op) = NodeOperator::<T>::get(&c) else {
+                        Self::deposit_event(Event::NotAdmittedNoOperator { who: c });
+                        continue;
+                    };
+                    eligible.push((Self::draw_key(&seed, &c), c, op));
+                }
                 eligible.sort();
-                winners.extend(
-                    eligible
-                        .into_iter()
-                        .take(T::AdmissionCapPerRound::get() as usize)
-                        .map(|(_, c)| c),
-                );
+                let mut taken = 0u32;
+                for (_, c, op) in eligible {
+                    if taken >= T::AdmissionCapPerRound::get() {
+                        break;
+                    }
+                    let used = room_used.get(&op).copied().unwrap_or(0);
+                    if used >= ApprovedOperators::<T>::get(&op).unwrap_or(0) {
+                        Self::deposit_event(Event::NotAdmittedOperatorCapReached {
+                            who: c,
+                            operator: op,
+                        });
+                        continue;
+                    }
+                    room_used.insert(op, used + 1);
+                    winners.push(c);
+                    taken += 1;
+                }
             }
 
             // **D47/D49 — vote cap per operator:** we first count how many live validators
@@ -1133,4 +1173,21 @@ pub mod pallet {
             }
         }
     }
+}
+
+// Benchmarks only (feature `runtime-benchmarks`). Kept at the end of the file on purpose: the default runtime wasm
+// embeds source line numbers (panic locations), so nothing above this line may move or the default wasm changes.
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
+
+/// Benchmarks only: the runtime prepares state owned by other pallets (session keys, BABE randomness) so the
+/// benchmarks reach the real worst-case paths. Not compiled without `runtime-benchmarks`.
+#[cfg(feature = "runtime-benchmarks")]
+pub trait BenchmarkHelper: Config {
+    /// Make `HasSessionKeys::contains(who)` true (register some session keys for `who`).
+    fn register_session_keys(who: &Self::AccountId);
+    /// Make `BlockRandomness` return a fresh `Some(..)` (a VRF output the accumulator has not seen).
+    fn set_block_vrf(seed: u8);
+    /// Fix the value `EpochRandomness` is derived from (so the puzzle seed is known in advance).
+    fn set_epoch_randomness(randomness: [u8; 32]);
 }

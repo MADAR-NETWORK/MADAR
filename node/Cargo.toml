@@ -69,7 +69,16 @@ sp-version = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "po
 frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
 frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
 pallet-collective = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+pallet-grandpa = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
 substrate-frame-rpc-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
+
+# Benchmarks only (feature `runtime-benchmarks`, off by default): `madar-node benchmark pallet|overhead|storage|machine`.
+frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", optional = true }
+frame-benchmarking-cli = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", optional = true }
+
+# Android (the mobile node app): OpenSSL is built with the program itself (there is no system library on Android). Does not affect Windows/Linux/macOS.
+[target.'cfg(target_os = "android")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [build-dependencies]
 substrate-build-script-utils = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
@@ -79,3 +88,15 @@ unsafe_code = "deny"
 
 [features]
 fast-test-runtime = ["madar-consensus/fast-test-runtime"]
+## Benchmarks only: adds the `benchmark` subcommand and builds the runtime with its benchmark API. Never for production.
+runtime-benchmarks = [
+    "madar-consensus/runtime-benchmarks",
+    "dep:frame-benchmarking",
+    "dep:frame-benchmarking-cli",
+    "frame-benchmarking/runtime-benchmarks",
+    "frame-benchmarking-cli/runtime-benchmarks",
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+    "sc-service/runtime-benchmarks",
+    "sp-runtime/runtime-benchmarks",
+]

@@ -50,6 +50,7 @@ fn cheap_rejections_are_refunded_but_a_failed_puzzle_pays_the_full_argon2_weight
 
         // 2) Wrong solution: Argon2 actually ran → no refund (actual_weight = None ⇒ the full weight).
         let who = account(61);
+        ensure_vouched(&who); // B2: an unvouched account is refused before Argon2 (that is the cheap path above)
         let seed = TestRandomness::random(madar_protocol::ADMISSION_PUZZLE_DOMAIN).0;
         let bad_nonce = (0u64..)
             .find(|n| !Admission::solution_meets_difficulty(&who, &seed, *n))

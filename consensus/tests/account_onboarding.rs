@@ -247,6 +247,11 @@ fn a_successful_admission_creates_the_account_and_enters_the_lottery() {
             "stale constant: regenerate with find_valid_nonce"
         );
         let before = account_count();
+        // B2 (2026-10-14): only a node an approved operator vouches for may become a candidate
+        madar_admission::NodeOperator::<Runtime>::insert(
+            &who,
+            sp_runtime::AccountId32::from([200u8; 32]),
+        );
 
         let call = RuntimeCall::Admission(madar_admission::Call::submit_admission_solution {
             nonce: VALID_NONCE_FOR_SEED_77,
@@ -282,6 +287,8 @@ fn a_failed_admission_leaves_no_account_nonce_or_admission_state() {
         start_block();
         let (pair, who) = signer(80);
         let bad = (1u64..).find(|n| !puzzle_ok(&who, *n)).unwrap();
+        // vouched, so the wrong solution really reaches the puzzle check (not the cheap NodeNotVouched refusal)
+        madar_admission::NodeOperator::<Runtime>::insert(&who, AccountId::from([200u8; 32]));
         let before = account_count();
 
         let call =
@@ -299,6 +306,57 @@ fn a_failed_admission_leaves_no_account_nonce_or_admission_state() {
         assert_eq!(account_count(), before);
         assert_eq!(frame_system::Pallet::<Runtime>::account_nonce(&who), 0);
         assert!(admission_state_is_empty());
+    });
+}
+
+/// B2 (spec 9): an operator approved by the committee that has no account yet creates it with its first vouch, then the
+/// node it vouched for applies. Without this no new operator could start (the vouch is now required before applying, and applying was its only way to create the account).
+#[test]
+fn a_new_approved_operator_creates_its_account_by_vouching_and_its_node_then_applies() {
+    new_test_ext(&[]).execute_with(|| {
+        start_block();
+        let (op_pair, op) = signer(90);
+        let (node_pair, node) = signer(77);
+        madar_admission::ApprovedOperators::<Runtime>::insert(&op, 1);
+        assert_eq!(providers(&op), 0, "no account yet");
+
+        let vouch =
+            RuntimeCall::Admission(madar_admission::Call::vouch_node { node: node.clone() });
+        let outcome =
+            Executive::apply_extrinsic(signed(&op_pair, &op, vouch, 0)).expect("includable");
+        assert!(
+            outcome.is_ok(),
+            "an approved operator may create its account with its first vouch: {outcome:?}"
+        );
+        assert_eq!(providers(&op), 1);
+        assert_eq!(
+            madar_admission::NodeOperator::<Runtime>::get(&node),
+            Some(op.clone())
+        );
+
+        let apply = RuntimeCall::Admission(madar_admission::Call::submit_admission_solution {
+            nonce: VALID_NONCE_FOR_SEED_77,
+        });
+        let outcome =
+            Executive::apply_extrinsic(signed(&node_pair, &node, apply, 0)).expect("includable");
+        assert!(outcome.is_ok(), "the vouched node applies: {outcome:?}");
+        assert_eq!(madar_admission::Pallet::<Runtime>::candidates(), vec![node]);
+    });
+}
+
+/// An unapproved account cannot create an account by vouching.
+#[test]
+fn an_unapproved_account_cannot_create_an_account_by_vouching() {
+    new_test_ext(&[]).execute_with(|| {
+        start_block();
+        let (pair, who) = signer(91);
+        let (_, node) = signer(92);
+        let vouch = RuntimeCall::Admission(madar_admission::Call::vouch_node { node });
+        assert!(
+            Executive::apply_extrinsic(signed(&pair, &who, vouch, 0)).is_err(),
+            "only committee-approved operators"
+        );
+        assert_eq!(providers(&who), 0);
     });
 }
 

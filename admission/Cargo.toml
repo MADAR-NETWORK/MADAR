@@ -18,6 +18,7 @@ frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "
 frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false }
 pallet-session = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false, features = ["historical"] }
 madar-protocol = { path = "../protocol", default-features = false }
+frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", default-features = false, optional = true }
 
 [dev-dependencies]
 sp-io = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2" }
@@ -39,4 +40,14 @@ std = [
     "frame-support/std",
     "pallet-session/std",
     "madar-protocol/std",
+    "frame-benchmarking?/std",
+]
+## Benchmarks only (FRAME `benchmark pallet`); off by default, never part of a production build.
+runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+    "pallet-session/runtime-benchmarks",
+    "sp-runtime/runtime-benchmarks",
+    "sp-staking/runtime-benchmarks",
 ]

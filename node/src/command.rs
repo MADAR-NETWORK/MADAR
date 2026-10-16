@@ -130,6 +130,8 @@ pub fn run() -> sc_cli::Result<()> {
             let runner = cli.create_runner(cmd)?;
             runner.sync_run(|config| cmd.run::<Block>(&config))
         }
+        #[cfg(feature = "runtime-benchmarks")]
+        Some(Subcommand::Benchmark(cmd)) => run_benchmark(&cli, cmd),
         Some(Subcommand::CheckUpdate(cmd)) => run_check_update(cmd),
         Some(Subcommand::Doctor(cmd)) => match crate::doctor::run(cmd.clone()) {
             Ok(code) => {
@@ -191,6 +193,39 @@ pub fn run() -> sc_cli::Result<()> {
             })
         }
     }
+}
+
+/// `madar-node benchmark …` (B1 measurement; only in a `runtime-benchmarks` build). `block` and `extrinsic` are not wired.
+#[cfg(feature = "runtime-benchmarks")]
+fn run_benchmark(cli: &Cli, cmd: &frame_benchmarking_cli::BenchmarkCmd) -> sc_cli::Result<()> {
+    use frame_benchmarking_cli::{BenchmarkCmd, SUBSTRATE_REFERENCE_HARDWARE};
+    let runner = cli.create_runner(cmd)?;
+    runner.sync_run(|config| match cmd {
+        BenchmarkCmd::Pallet(cmd) => {
+            cmd.run_with_spec::<sp_runtime::traits::HashingFor<Block>, ()>(Some(config.chain_spec))
+        },
+        BenchmarkCmd::Storage(cmd) => {
+            let PartialComponents { client, backend, .. } = service::new_partial(&config)?;
+            let db = backend.expose_db();
+            let storage = backend.expose_storage();
+            let shared_cache = backend.expose_shared_trie_cache();
+            cmd.run(config, client, db, storage, shared_cache)
+        },
+        BenchmarkCmd::Overhead(cmd) => {
+            let PartialComponents { client, .. } = service::new_partial(&config)?;
+            let ext_builder = crate::benchmarking::RemarkBuilder::new(client.clone());
+            cmd.run(
+                config.chain_spec.name().into(),
+                client,
+                crate::benchmarking::inherent_benchmark_data()?,
+                Vec::new(),
+                &ext_builder,
+                false,
+            )
+        },
+        BenchmarkCmd::Machine(cmd) => cmd.run(&config, SUBSTRATE_REFERENCE_HARDWARE.clone()),
+        _ => Err("this benchmark subcommand is not wired in madar-node (use pallet, overhead, storage, machine)".into()),
+    })
 }
 
 /// Format of a single entry in `docs/security/release-trusted-keys.json` — see

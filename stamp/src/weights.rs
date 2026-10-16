@@ -16,13 +16,14 @@ pub struct ConservativeWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for ConservativeWeight<T> {
     fn stamp(n: u32) -> Weight {
         let n = n as u64;
-        // Base: reading the stamper list. Per entry: read + write + signature check + event.
+        // Base: reading the stamper list and `Timestamp` (B1: two fixed reads, measured). Per entry: read + write +
+        // signature check + event. B1 (WASM, x86): 75 us at n=1 and 2.69 ms at n=50 (EVM); 250 us per entry is >= 2x at every n.
         Weight::from_parts(30_000_000, 2_000)
             .saturating_add(Weight::from_parts(
                 n.saturating_mul(250_000_000),
                 n.saturating_mul(1_200),
             ))
-            .saturating_add(T::DbWeight::get().reads_writes(1 + n, 2 * n))
+            .saturating_add(T::DbWeight::get().reads_writes(2 + n, 2 * n))
     }
 
     fn set_stamper() -> Weight {

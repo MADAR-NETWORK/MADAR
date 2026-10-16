@@ -16,11 +16,18 @@ use sc_transaction_pool_api::OffchainTransactionPoolFactory;
 use sp_consensus_babe::inherents::BabeCreateInherentDataProviders;
 use std::{sync::Arc, time::Duration};
 
-pub(crate) type FullClient = sc_service::TFullClient<
-    Block,
-    RuntimeApi,
-    sc_executor::WasmExecutor<sp_io::SubstrateHostFunctions>,
->;
+/// Host functions of the runtime executor. A `runtime-benchmarks` build adds the benchmarking ones (its runtime imports
+/// them); every other build keeps exactly `SubstrateHostFunctions`.
+#[cfg(not(feature = "runtime-benchmarks"))]
+pub(crate) type HostFunctions = sp_io::SubstrateHostFunctions;
+#[cfg(feature = "runtime-benchmarks")]
+pub(crate) type HostFunctions = (
+    sp_io::SubstrateHostFunctions,
+    frame_benchmarking::benchmarking::HostFunctions,
+);
+
+pub(crate) type FullClient =
+    sc_service::TFullClient<Block, RuntimeApi, sc_executor::WasmExecutor<HostFunctions>>;
 pub(crate) type FullBackend = sc_service::TFullBackend<Block>;
 type FullSelectChain = sc_consensus::LongestChain<FullBackend, Block>;
 type FullGrandpaBlockImport =
@@ -68,7 +75,7 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
         })
         .transpose()?;
 
-    let executor = sc_service::new_wasm_executor::<sp_io::SubstrateHostFunctions>(&config.executor);
+    let executor = sc_service::new_wasm_executor::<HostFunctions>(&config.executor);
     let (client, backend, keystore_container, task_manager) =
         sc_service::new_full_parts::<Block, RuntimeApi, _>(
             config,

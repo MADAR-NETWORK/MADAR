@@ -6,7 +6,8 @@
 //!    its two transactions and adds them to the request file. First member: propose + vote. Second: vote + close (execute). Neither the key nor the passphrase is written to disk.
 //! 3. `submit` (online): sends the four transactions in order, waits for each to be included, then verifies the decision's effect on chain.
 //!
-//! Supported decisions: `approve-operator` (approve an operator with a vote cap) and `upgrade-runtime` (network upgrade): the committee approves only the **hash** of the WASM file
+//! Supported decisions: `approve-operator` (approve an operator with a vote cap), `names-reserve` (reserve a name in Madar Names or release it,
+//! `Names::set_reserved`), `recover-finality` (recover stalled finality: `Grandpa::note_stalled`) and `upgrade-runtime` (network upgrade): the committee approves only the **hash** of the WASM file
 //! (`System::authorize_upgrade` via `UpgradeAuthority::dispatch_as_root`), so the signature stays small with no large file; then `submit` sends the file itself
 //! (`apply_authorized_upgrade`, unsigned) and the chain accepts it only if its hash matches and its version is newer. Transactions are Mortal (window ~256 blocks ≈ 40 minutes): signing
 //! and submitting must both happen within it, otherwise `prepare` must be rerun.
@@ -15,7 +16,8 @@ use crate::join::account::{self, Account};
 use crate::join::rpc::{HttpRpc, Transport};
 use crate::join::tx::{self, TxParams};
 use madar_consensus::{
-    madar_admission, AccountId, Runtime, RuntimeCall, UpgradeCommitteeInstance, VERSION,
+    madar_admission, madar_names, AccountId, Runtime, RuntimeCall, UpgradeCommitteeInstance,
+    VERSION,
 };
 use parity_scale_codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
@@ -37,9 +39,13 @@ const PROBES: &[&str] = &[
     "1.1.1.1:443",
     "8.8.8.8:53",
     "188.241.241.253:30333",
-    "103.254.60.222:30333",
+    "188.241.241.234:30333",
 ];
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Finality recovery is prepared only if finality lags the best block by at least this much (~15 minutes): forcing is an emergency tool, not for a passing delay.
+pub const MIN_STALL_BLOCKS: u64 = 100;
+/// The default wait in blocks after the session starts before the forced set takes effect.
+pub const RECOVER_DELAY: u32 = 50;
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum CommitteeCmd {
@@ -47,6 +53,10 @@ pub enum CommitteeCmd {
     Prepare(PrepareArgs),
     /// (online) Prepare a network-upgrade request from a WASM file: only its hash is approved.
     PrepareUpgrade(PrepareUpgradeArgs),
+    /// (online) Prepare a request to reserve a name in Madar Names or release it (`--reserved false` = release).
+    PrepareNamesReserve(PrepareNamesReserveArgs),
+    /// (online) Prepare a request to recover stalled finality: at the start of the next session the current voter set is forced on GRANDPA.
+    PrepareRecoverFinality(PrepareRecoverFinalityArgs),
     /// (offline) A committee member signs the request. Refuses to run while the machine is online.
     Sign(SignArgs),
     /// (online) Submit a request signed by two members to the network in order, and verify the result.
@@ -77,6 +87,35 @@ pub struct PrepareUpgradeArgs {
     /// The new Runtime file (`madar_consensus.compact.compressed.wasm`). It stays in place: `submit` reads it and verifies its hash.
     #[arg(long)]
     pub wasm: PathBuf,
+    #[arg(long)]
+    pub out: PathBuf,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct PrepareNamesReserveArgs {
+    #[arg(long, default_value = "127.0.0.1:9944")]
+    pub rpc: String,
+    /// The name (like `madar` or `madar.madar`).
+    #[arg(long)]
+    pub name: String,
+    /// true = reserve the name, false = release it (so it can be registered).
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub reserved: bool,
+    #[arg(long)]
+    pub out: PathBuf,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct PrepareRecoverFinalityArgs {
+    #[arg(long, default_value = "127.0.0.1:9944")]
+    pub rpc: String,
+    /// Accounts of the permanently dead voters (SS58, one or more). The tool refuses while any of them is in the next session's set:
+    /// forcing takes the next session's set as it is, so if a dead voter stays in it the stall repeats.
+    #[arg(long, required = true, num_args = 1..)]
+    pub dead: Vec<String>,
+    /// Number of blocks after the next session starts before the forced set takes effect.
+    #[arg(long, default_value_t = RECOVER_DELAY)]
+    pub delay: u32,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -141,6 +180,12 @@ pub struct Request {
     /// For `upgrade-runtime` requests only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<UpgradeInfo>,
+    /// For `names-reserve` requests only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names_reserve: Option<NamesReserveInfo>,
+    /// For `recover-finality` requests only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover: Option<RecoverInfo>,
     /// The call the committee will execute (SCALE-encoded).
     pub call_hex: String,
     pub proposal_hash: H256,
@@ -168,6 +213,20 @@ pub struct UpgradeInfo {
     pub to_spec: u32,
 }
 
+/// Finality recovery: the voters the preparer declared dead, and the voter set id at preparation (to tell that the forcing happened).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecoverInfo {
+    pub dead: Vec<String>,
+    pub set_id: u64,
+}
+
+/// Reserve or release a name: the name without `.madar`, and the requested state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NamesReserveInfo {
+    pub name: String,
+    pub reserved: bool,
+}
+
 impl Request {
     pub fn signers(&self) -> Vec<String> {
         let mut s: Vec<String> = Vec::new();
@@ -193,6 +252,8 @@ pub fn run(cmd: CommitteeCmd) -> Result<(), String> {
     match cmd {
         CommitteeCmd::Prepare(a) => prepare(a),
         CommitteeCmd::PrepareUpgrade(a) => prepare_upgrade(a),
+        CommitteeCmd::PrepareNamesReserve(a) => prepare_names_reserve(a),
+        CommitteeCmd::PrepareRecoverFinality(a) => prepare_recover_finality(a),
         CommitteeCmd::Sign(a) => sign(a),
         CommitteeCmd::Submit(a) => submit(a),
         CommitteeCmd::Show(a) => show(a),
@@ -214,6 +275,67 @@ fn authorize_upgrade_call(code_hash: H256) -> RuntimeCall {
             code_hash,
         })),
     })
+}
+
+fn names_reserve_call(name: madar_names::NameOf, reserved: bool) -> RuntimeCall {
+    RuntimeCall::Names(madar_names::Call::set_reserved { name, reserved })
+}
+
+/// The text a member sees for a decision to reserve/release a name.
+pub fn names_reserve_summary(name: &str, reserved: bool) -> String {
+    if reserved {
+        format!("Reserve the name {name}.madar")
+    } else {
+        format!("Release the name {name}.madar")
+    }
+}
+
+fn recover_finality_call(delay: u32, best_finalized: u32) -> RuntimeCall {
+    RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root {
+        call: Box::new(RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled {
+            delay,
+            best_finalized_block_number: best_finalized,
+        })),
+    })
+}
+
+pub fn recover_finality_summary(delay: u32, best_finalized: u32) -> String {
+    format!(
+        "Recover finality stalled at block #{best_finalized}: force the current voter set at the start of the next session after {delay} blocks"
+    )
+}
+
+/// What the decision will actually execute, read from the encoded call itself (not from the description text in the file). `None` = a call
+/// the tool does not know, so it is never signed.
+pub fn call_summary(call: &RuntimeCall) -> Option<String> {
+    match call {
+        RuntimeCall::Names(madar_names::Call::set_reserved { name, reserved }) => Some(
+            names_reserve_summary(std::str::from_utf8(name).ok()?, *reserved),
+        ),
+        RuntimeCall::Admission(madar_admission::Call::approve_operator {
+            operator,
+            max_votes,
+        }) => Some(format!(
+            "Approve operator {} with a cap of {max_votes} vote(s)",
+            operator.to_ss58check()
+        )),
+        RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root { call }) => {
+            match &**call {
+                RuntimeCall::System(frame_system::Call::authorize_upgrade { code_hash }) => Some(
+                    format!("Approve the network upgrade to the file with hash {code_hash:?}"),
+                ),
+                RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled {
+                    delay,
+                    best_finalized_block_number,
+                }) => Some(recover_finality_summary(
+                    *delay,
+                    *best_finalized_block_number,
+                )),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn propose(call: &RuntimeCall) -> RuntimeCall {
@@ -283,6 +405,67 @@ fn approved_votes(t: &dyn Transport, operator: &AccountId) -> Result<Option<u32>
         t,
         madar_admission::ApprovedOperators::<Runtime>::hashed_key_for(operator),
     )
+}
+
+/// Is the name in the on-chain reserved list of Madar Names?
+fn name_reserved(t: &dyn Transport, name: &madar_names::NameOf) -> Result<bool, String> {
+    let key = madar_names::Reserved::<Runtime>::hashed_key_for(name);
+    Ok(t.call(
+        "state_getStorage",
+        json!([format!("0x{}", hex::encode(key))]),
+    )?
+    .as_str()
+    .is_some())
+}
+
+/// Is this request's own proposal (same hash and same index) already on chain? This happens when the first member's proposal reached the network but was not
+/// recorded in the file (interrupted after sending and before saving) — so the proposal count changed because of it, not because of another proposal.
+fn own_proposal_on_chain(t: &dyn Transport, r: &Request) -> Result<bool, String> {
+    // The first field of `Votes` is the proposal index (decoding the first field is enough; the other fields are private).
+    let index: Option<u32> = storage(
+        t,
+        pallet_collective::Voting::<Runtime, UpgradeCommitteeInstance>::hashed_key_for(
+            r.proposal_hash,
+        ),
+    )?;
+    Ok(index == Some(r.proposal_index))
+}
+
+fn header_number(v: &serde_json::Value) -> Result<u64, String> {
+    u64::from_str_radix(
+        v.get("number")
+            .and_then(|n| n.as_str())
+            .ok_or("Invalid block header")?
+            .trim_start_matches("0x"),
+        16,
+    )
+    .map_err(|_| "Invalid block number".into())
+}
+
+fn finalized_block(t: &dyn Transport) -> Result<u64, String> {
+    let hash = t.call("chain_getFinalizedHead", json!([]))?;
+    header_number(&t.call("chain_getHeader", json!([hash]))?)
+}
+
+/// `Grandpa::Stalled` present = the recovery decision reached the chain and is waiting for the next session to start.
+fn grandpa_stalled(t: &dyn Transport) -> Result<Option<(u32, u32)>, String> {
+    storage(t, pallet_grandpa::Stalled::<Runtime>::hashed_key().to_vec())
+}
+
+/// Accounts of the next session's set (`Session::QueuedKeys`) — exactly what is forced on GRANDPA at the start of the session.
+fn queued_validators(t: &dyn Transport) -> Result<Vec<AccountId>, String> {
+    let mut key = sp_crypto_hashing::twox_128(b"Session").to_vec();
+    key.extend(sp_crypto_hashing::twox_128(b"QueuedKeys"));
+    let keys: Vec<(AccountId, madar_consensus::SessionKeys)> = storage(t, key)?.unwrap_or_default();
+    Ok(keys.into_iter().map(|(a, _)| a).collect())
+}
+
+fn grandpa_set_id(t: &dyn Transport) -> Result<u64, String> {
+    Ok(storage(
+        t,
+        pallet_grandpa::CurrentSetId::<Runtime>::hashed_key().to_vec(),
+    )?
+    .unwrap_or(0))
 }
 
 fn best_block(t: &dyn Transport) -> Result<u64, String> {
@@ -377,6 +560,8 @@ pub fn prepare_request(
         operator: operator.to_ss58check(),
         max_votes,
         upgrade: None,
+        names_reserve: None,
+        recover: None,
         call_hex: format!("0x{}", hex::encode(call.encode())),
         proposal_hash: BlakeTwo256::hash_of(&call),
         proposal_index: proposal_count(t)?,
@@ -437,6 +622,8 @@ pub fn prepare_upgrade_request(
             from_spec: spec,
             to_spec: v.spec_version,
         }),
+        names_reserve: None,
+        recover: None,
         call_hex: format!("0x{}", hex::encode(call.encode())),
         proposal_hash: BlakeTwo256::hash_of(&call),
         proposal_index: proposal_count(t)?,
@@ -448,6 +635,171 @@ pub fn prepare_upgrade_request(
         signed: vec![],
         done: false,
     })
+}
+
+/// Request to reserve or release a name (`Names::set_reserved`, the 2-of-3 committee gate).
+pub fn prepare_names_reserve_request(
+    t: &dyn Transport,
+    name: &str,
+    reserved: bool,
+) -> Result<Request, String> {
+    let spec = check_runtime(t)?;
+    let name = crate::names::parse_name(name)?;
+    let plain = String::from_utf8(name.to_vec()).map_err(|_| "Invalid name".to_string())?;
+    if name_reserved(t, &name)? == reserved {
+        return Err(if reserved {
+            format!("The name {plain}.madar is already reserved — no request needed.")
+        } else {
+            format!("The name {plain}.madar is already not reserved — no request needed.")
+        });
+    }
+    let members = members(t)?;
+    if members.len() < THRESHOLD as usize {
+        return Err("The on-chain upgrade committee has fewer than two members — a 2-of-3 decision cannot pass.".into());
+    }
+    let mut with_nonces = Vec::new();
+    for m in &members {
+        with_nonces.push((m.to_ss58check(), tx::next_nonce(t, m)?));
+    }
+    let call = names_reserve_call(name, reserved);
+    let params = tx::fetch_params(t, ERA_PERIOD)?;
+    Ok(Request {
+        version: 1,
+        action: "names-reserve".into(),
+        description: names_reserve_summary(&plain, reserved),
+        operator: String::new(),
+        max_votes: 0,
+        upgrade: None,
+        names_reserve: Some(NamesReserveInfo {
+            name: plain,
+            reserved,
+        }),
+        recover: None,
+        call_hex: format!("0x{}", hex::encode(call.encode())),
+        proposal_hash: BlakeTwo256::hash_of(&call),
+        proposal_index: proposal_count(t)?,
+        spec_version: spec,
+        transaction_version: VERSION.transaction_version,
+        expires_at_block: params.expires_at(),
+        params,
+        members: with_nonces,
+        signed: vec![],
+        done: false,
+    })
+}
+
+/// Finality recovery request: refuses if finality is working (lag below `MIN_STALL_BLOCKS`), and pins the last finalized block as the node sees it.
+pub fn prepare_recover_finality_request(
+    t: &dyn Transport,
+    dead: &[AccountId],
+    delay: u32,
+) -> Result<Request, String> {
+    let spec = check_runtime(t)?;
+    let best = best_block(t)?;
+    let fin = finalized_block(t)?;
+    if best < fin + MIN_STALL_BLOCKS {
+        return Err(format!(
+            "Finality is not stalled: best block #{best} and last finalized block #{fin} (the gap is below {MIN_STALL_BLOCKS}). No recovery needed."
+        ));
+    }
+    if grandpa_stalled(t)?.is_some() {
+        return Err("An earlier recovery decision is waiting for the next session to start — no new request needed.".into());
+    }
+    if !(1..=1000).contains(&delay) {
+        return Err("--delay must be between 1 and 1000 blocks.".into());
+    }
+    if dead.is_empty() {
+        return Err("Name the dead voters with --dead.".into());
+    }
+    let queued = queued_validators(t)?;
+    if queued.is_empty() {
+        return Err("Could not read the next session's set.".into());
+    }
+    if let Some(d) = dead.iter().find(|d| queued.contains(d)) {
+        return Err(format!(
+            "Voter {} is still in the next session's set — forcing would take it along and the stall would repeat. Wait until its membership ends and it leaves, then prepare again.",
+            d.to_ss58check()
+        ));
+    }
+    let fin = u32::try_from(fin).map_err(|_| "Block number too large".to_string())?;
+    let members = members(t)?;
+    if members.len() < THRESHOLD as usize {
+        return Err("The on-chain upgrade committee has fewer than two members — a 2-of-3 decision cannot pass.".into());
+    }
+    let mut with_nonces = Vec::new();
+    for m in &members {
+        with_nonces.push((m.to_ss58check(), tx::next_nonce(t, m)?));
+    }
+    let call = recover_finality_call(delay, fin);
+    let params = tx::fetch_params(t, ERA_PERIOD)?;
+    Ok(Request {
+        version: 1,
+        action: "recover-finality".into(),
+        description: recover_finality_summary(delay, fin),
+        operator: String::new(),
+        max_votes: 0,
+        upgrade: None,
+        names_reserve: None,
+        recover: Some(RecoverInfo {
+            dead: dead.iter().map(|d| d.to_ss58check()).collect(),
+            set_id: grandpa_set_id(t)?,
+        }),
+        call_hex: format!("0x{}", hex::encode(call.encode())),
+        proposal_hash: BlakeTwo256::hash_of(&call),
+        proposal_index: proposal_count(t)?,
+        spec_version: spec,
+        transaction_version: VERSION.transaction_version,
+        expires_at_block: params.expires_at(),
+        params,
+        members: with_nonces,
+        signed: vec![],
+        done: false,
+    })
+}
+
+fn prepare_recover_finality(a: PrepareRecoverFinalityArgs) -> Result<(), String> {
+    let t = HttpRpc::new(&a.rpc);
+    let mut dead = Vec::new();
+    for d in &a.dead {
+        dead.push(account::parse_address(d)?);
+    }
+    let r = prepare_recover_finality_request(&t, &dead, a.delay)?;
+    write_request(&a.out, &r)?;
+    println!("Request prepared: {}", r.description);
+    println!("  File: {}", a.out.display());
+    println!(
+        "  Valid until block #{} (sign and submit before then).",
+        r.expires_at_block
+    );
+    println!("Next step: disconnect from the internet, then: madar-node committee sign --request {} --key-file <member-key.enc>", a.out.display());
+    Ok(())
+}
+
+/// What to do after a name release is executed.
+fn names_follow_up(n: &NamesReserveInfo) -> Option<String> {
+    (!n.reserved).then(|| {
+        format!(
+            "Next step: register the name {}.madar to its wallet with that wallet's signature (through the registration service).",
+            n.name
+        )
+    })
+}
+
+fn prepare_names_reserve(a: PrepareNamesReserveArgs) -> Result<(), String> {
+    let t = HttpRpc::new(&a.rpc);
+    let r = prepare_names_reserve_request(&t, &a.name, a.reserved)?;
+    write_request(&a.out, &r)?;
+    println!("Request prepared: {}", r.description);
+    println!("  File: {}", a.out.display());
+    println!(
+        "  Valid until block #{} (sign and submit before then).",
+        r.expires_at_block
+    );
+    println!(
+        "Next step: disconnect from the internet, then: madar-node committee sign --request {} --key-file <member-key.enc>",
+        a.out.display()
+    );
+    Ok(())
 }
 
 fn prepare_upgrade(a: PrepareUpgradeArgs) -> Result<(), String> {
@@ -519,6 +871,25 @@ pub fn sign_request(r: &mut Request, acct: &Account) -> Result<String, String> {
     if BlakeTwo256::hash_of(&call) != r.proposal_hash {
         return Err("Request file is corrupted (the proposal hash does not match its contents) — will not sign.".into());
     }
+    let summary = call_summary(&call)
+        .ok_or("The request holds a decision this tool does not know — will not sign.")?;
+    if let Some(n) = &r.names_reserve {
+        // The description the member sees must match what will actually be executed.
+        let expected = names_reserve_summary(&n.name, n.reserved);
+        if r.action != "names-reserve" || summary != expected || r.description != expected {
+            return Err("Request file is corrupted (the name-reserve description does not match its contents) — will not sign.".into());
+        }
+    } else if r.action == "names-reserve" || matches!(call, RuntimeCall::Names(_)) {
+        return Err(
+            "Request file is corrupted (a names decision without its details) — will not sign."
+                .into(),
+        );
+    }
+    let is_recover = matches!(&call, RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root { call })
+        if matches!(&**call, RuntimeCall::Grandpa(_)));
+    if (r.action == "recover-finality") != is_recover || (is_recover && r.description != summary) {
+        return Err("Request file is corrupted (the finality-recovery description does not match its contents) — will not sign.".into());
+    }
     let first = r.signed.is_empty();
     let (a_call, a_kind, b_call, b_kind) = if first {
         (
@@ -547,9 +918,9 @@ pub fn sign_request(r: &mut Request, acct: &Account) -> Result<String, String> {
         });
     }
     Ok(if first {
-        format!("Signature 1 of 2 ({who}): propose + vote")
+        format!("Signature 1 of 2 on \"{summary}\" ({who}): propose + vote")
     } else {
-        format!("Signature 2 of 2 ({who}): vote + execute")
+        format!("Signature 2 of 2 on \"{summary}\" ({who}): vote + execute")
     })
 }
 
@@ -648,12 +1019,25 @@ pub fn submit_request(
             ));
         }
     }
+    if let Some(n) = r.names_reserve.clone() {
+        if r.signed.iter().all(|s| !s.submitted)
+            && name_reserved(t, &crate::names::parse_name(&n.name)?)? == n.reserved
+        {
+            return Err(format!(
+                "{} — the chain is already in that state, nothing was sent.",
+                r.description
+            ));
+        }
+    }
     check_runtime(t)?;
     let best = best_block(t)?;
     if best >= r.expires_at_block {
         return Err(format!("The request has expired (current block #{best} ≥ #{}) — prepare a new request and sign it.", r.expires_at_block));
     }
-    if r.signed.iter().all(|s| !s.submitted) && proposal_count(t)? != r.proposal_index {
+    if r.signed.iter().all(|s| !s.submitted)
+        && proposal_count(t)? != r.proposal_index
+        && !own_proposal_on_chain(t, r)?
+    {
         return Err("Another committee proposal was submitted since preparation, so the proposal index changed — prepare a new request.".into());
     }
     // Order: first member's proposal, its vote, the second member's vote, the second member's close.
@@ -699,6 +1083,37 @@ pub fn submit_request(
     }
     if let Some(u) = r.upgrade.clone() {
         return apply_upgrade(t, r, &u, wait, save);
+    }
+    if let Some(n) = r.names_reserve.clone() {
+        let name = crate::names::parse_name(&n.name)?;
+        let now = name_reserved(t, &name)?;
+        if now != n.reserved {
+            return Err(format!(
+                "The four transactions were sent but the name's reservation did not change on chain (reserved now: {}). Check the chain events.",
+                if now { "yes" } else { "no" }
+            ));
+        }
+        r.done = true;
+        save(r);
+        let done = format!("✅ Committee decision executed: {}", r.description);
+        // A caller showing only the last line sees the result; the next step comes before it.
+        return Ok(match names_follow_up(&n) {
+            Some(f) => format!("{f}\n{done}"),
+            None => done,
+        });
+    }
+    if r.action == "recover-finality" {
+        let before = r.recover.as_ref().map(|i| i.set_id).unwrap_or(u64::MAX);
+        if grandpa_stalled(t)?.is_none() && grandpa_set_id(t)? <= before {
+            return Err("The four transactions were sent but the recovery decision did not appear on chain. Check the chain events.".into());
+        }
+        r.done = true;
+        save(r);
+        return Ok(format!(
+            "Next: at the start of the next session the voter set id changes (now {}) and finality resumes. Do not repeat the decision; if it is late, check the set id.\n✅ Committee decision executed: {}",
+            grandpa_set_id(t)?,
+            r.description
+        ));
     }
     let operator = account::parse_address(&r.operator)?;
     match approved_votes(t, &operator)? {
@@ -784,6 +1199,21 @@ fn show(a: ShowArgs) -> Result<(), String> {
         return Ok(());
     }
     println!("{}", r.description);
+    match r.call().ok().and_then(|c| call_summary(&c)) {
+        Some(s) => println!("What will actually be executed (from the request contents): {s}"),
+        None => println!("Warning: this tool does not know the request contents — do not sign it."),
+    }
+    if let Some(n) = &r.names_reserve {
+        if let Some(f) = names_follow_up(n) {
+            println!("After execution — {f}");
+        }
+    }
+    if let Some(i) = &r.recover {
+        println!(
+            "Dead voters according to the preparer: {}",
+            i.dead.join(", ")
+        );
+    }
     if let Some(u) = &r.upgrade {
         println!("Upgrade file: {} ({} bytes)", u.code_file, u.code_size);
     }
@@ -835,6 +1265,8 @@ mod tests {
             operator: op.to_ss58check(),
             max_votes: 1,
             upgrade: None,
+            names_reserve: None,
+            recover: None,
             call_hex: format!("0x{}", hex::encode(call.encode())),
             proposal_hash: BlakeTwo256::hash_of(&call),
             proposal_index: 7,
@@ -1006,10 +1438,279 @@ mod tests {
         );
     }
 
+    fn names_request(members: &[&Account], name: &str, reserved: bool) -> Request {
+        let mut r = request(members);
+        let call = names_reserve_call(crate::names::parse_name(name).unwrap(), reserved);
+        r.action = "names-reserve".into();
+        r.description = names_reserve_summary(name, reserved);
+        r.operator = String::new();
+        r.max_votes = 0;
+        r.names_reserve = Some(NamesReserveInfo {
+            name: name.into(),
+            reserved,
+        });
+        r.call_hex = format!("0x{}", hex::encode(call.encode()));
+        r.proposal_hash = BlakeTwo256::hash_of(&call);
+        r
+    }
+
+    #[test]
+    fn the_names_reserve_call_matches_the_spec_8_runtime_indexes() {
+        // Names = index 12 in construct_runtime, and `set_reserved` = call_index 4; then the name (BoundedVec) then bool.
+        let call = names_reserve_call(crate::names::parse_name("madar").unwrap(), false);
+        let mut want = vec![12u8, 4, 5 << 2];
+        want.extend_from_slice(b"madar");
+        want.push(0);
+        assert_eq!(call.encode(), want);
+        assert_eq!(
+            names_reserve_call(crate::names::parse_name("madar.madar").unwrap(), true)
+                .encode()
+                .last(),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn members_see_and_sign_exactly_the_names_decision() {
+        let (a, b, c) = (acct(1), acct(2), acct(3));
+        let mut r = names_request(&[&a, &b, &c], "madar", false);
+        assert_eq!(r.description, "Release the name madar.madar");
+        assert_eq!(
+            call_summary(&r.call().unwrap()).unwrap(),
+            "Release the name madar.madar"
+        );
+        assert_eq!(
+            names_reserve_summary("abc", true),
+            "Reserve the name abc.madar"
+        );
+        assert!(sign_request(&mut r, &acct(5))
+            .unwrap_err()
+            .contains("is not a member"));
+        let m1 = sign_request(&mut r, &a).unwrap();
+        assert!(
+            m1.contains("1 of 2") && m1.contains("Release the name madar.madar"),
+            "{m1}"
+        );
+        assert!(!r.complete(), "one signature is not enough");
+        let m2 = sign_request(&mut r, &b).unwrap();
+        assert!(
+            m2.contains("2 of 2") && m2.contains("Release the name madar.madar"),
+            "{m2}"
+        );
+        assert!(r.complete());
+        let kinds: Vec<&str> = r.signed.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["propose", "vote", "vote", "close"]);
+    }
+
+    #[test]
+    fn a_names_request_whose_text_does_not_match_its_call_is_refused() {
+        let (a, b) = (acct(1), acct(2));
+        // The description says "reserve" and the call says "release".
+        let mut lie = names_request(&[&a, &b], "madar", false);
+        lie.description = names_reserve_summary("madar", true);
+        assert!(sign_request(&mut lie, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        // The request details name a different name than the call.
+        let mut other = names_request(&[&a, &b], "madar", false);
+        other.names_reserve = Some(NamesReserveInfo {
+            name: "admin".into(),
+            reserved: false,
+        });
+        other.description = names_reserve_summary("admin", false);
+        assert!(sign_request(&mut other, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        // A names decision hidden in a request that looks like an operator approval.
+        let mut hidden = names_request(&[&a, &b], "madar", false);
+        hidden.names_reserve = None;
+        hidden.action = "approve-operator".into();
+        assert!(sign_request(&mut hidden, &a)
+            .unwrap_err()
+            .contains("corrupted"));
+        assert!(lie.signed.is_empty() && other.signed.is_empty() && hidden.signed.is_empty());
+    }
+
+    #[test]
+    fn a_call_the_tool_cannot_describe_is_never_signed() {
+        let (a, b) = (acct(1), acct(2));
+        let mut r = request(&[&a, &b]);
+        let call = RuntimeCall::System(frame_system::Call::remark {
+            remark: vec![1, 2, 3],
+        });
+        r.call_hex = format!("0x{}", hex::encode(call.encode()));
+        r.proposal_hash = BlakeTwo256::hash_of(&call);
+        assert!(sign_request(&mut r, &a)
+            .unwrap_err()
+            .contains("does not know"));
+    }
+
+    fn recover_request(members: &[&Account], delay: u32, fin: u32) -> Request {
+        let mut r = request(members);
+        let call = recover_finality_call(delay, fin);
+        r.action = "recover-finality".into();
+        r.description = recover_finality_summary(delay, fin);
+        r.operator = String::new();
+        r.max_votes = 0;
+        r.call_hex = format!("0x{}", hex::encode(call.encode()));
+        r.proposal_hash = BlakeTwo256::hash_of(&call);
+        r
+    }
+
+    #[test]
+    fn the_recovery_call_notes_the_stall_through_the_root_gate() {
+        match recover_finality_call(10, 4) {
+            RuntimeCall::UpgradeAuthority(madar_upgrade_authority::Call::dispatch_as_root {
+                call,
+            }) => match *call {
+                RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled {
+                    delay,
+                    best_finalized_block_number,
+                }) => {
+                    assert_eq!((delay, best_finalized_block_number), (10, 4))
+                }
+                other => panic!("unexpected inner call {other:?}"),
+            },
+            other => panic!("unexpected call {other:?}"),
+        }
+    }
+
+    #[test]
+    fn members_sign_exactly_the_recovery_decision_and_a_mismatch_is_refused() {
+        let (a, b) = (acct(1), acct(2));
+        let mut r = recover_request(&[&a, &b], 10, 4);
+        assert_eq!(call_summary(&r.call().unwrap()).unwrap(), r.description);
+        assert!(
+            r.description.contains("#4") && r.description.contains("10 blocks"),
+            "{}",
+            r.description
+        );
+        assert!(sign_request(&mut r, &a).unwrap().contains("1 of 2"));
+        assert!(sign_request(&mut r, &b).unwrap().contains("2 of 2"));
+        // the text says block 4, the call says 900
+        let mut lie = recover_request(&[&a, &b], 10, 900);
+        lie.description = recover_finality_summary(10, 4);
+        assert!(sign_request(&mut lie, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        // a recovery call hidden in a request that looks like an operator approval
+        let mut hidden = recover_request(&[&a, &b], 10, 4);
+        hidden.action = "approve-operator".into();
+        assert!(sign_request(&mut hidden, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        // and the reverse: a "recover-finality" label on another call
+        let mut label = request(&[&a, &b]);
+        label.action = "recover-finality".into();
+        assert!(sign_request(&mut label, &a)
+            .unwrap_err()
+            .contains("does not match"));
+        assert!(lie.signed.is_empty() && hidden.signed.is_empty() && label.signed.is_empty());
+    }
+
+    struct Chain {
+        best: u64,
+        fin: u64,
+    }
+    impl Transport for Chain {
+        fn call(
+            &self,
+            method: &str,
+            _params: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            Ok(match method {
+                "state_getRuntimeVersion" => {
+                    json!({"specVersion": VERSION.spec_version, "transactionVersion": VERSION.transaction_version})
+                }
+                "chain_getFinalizedHead" => json!("0xfin"),
+                "state_getStorage" => {
+                    let mut key = sp_crypto_hashing::twox_128(b"Session").to_vec();
+                    key.extend(sp_crypto_hashing::twox_128(b"QueuedKeys"));
+                    if _params == json!([format!("0x{}", hex::encode(key))]) {
+                        let k = madar_consensus::SessionKeys {
+                            babe: sp_core::sr25519::Public::from_raw([0; 32]).into(),
+                            grandpa: sp_core::ed25519::Public::from_raw([0; 32]).into(),
+                        };
+                        json!(format!(
+                            "0x{}",
+                            hex::encode(vec![(AccountId::from([1u8; 32]), k)].encode())
+                        ))
+                    } else {
+                        serde_json::Value::Null
+                    }
+                }
+                "chain_getHeader" => {
+                    json!({"number": format!("0x{:x}", if _params == json!(["0xfin"]) { self.fin } else { self.best })})
+                }
+                other => return Err(format!("not mocked: {other}")),
+            })
+        }
+    }
+
+    #[test]
+    fn recovery_is_refused_while_finality_still_runs() {
+        let dead = [AccountId::from([2u8; 32])];
+        let e = prepare_recover_finality_request(
+            &Chain {
+                best: 150,
+                fin: 100,
+            },
+            &dead,
+            50,
+        )
+        .unwrap_err();
+        assert!(e.contains("is not stalled"), "{e}");
+        let e = prepare_recover_finality_request(
+            &Chain {
+                best: 199,
+                fin: 100,
+            },
+            &dead,
+            50,
+        )
+        .unwrap_err();
+        assert!(e.contains("is not stalled"), "{e}");
+    }
+
+    #[test]
+    fn recovery_waits_until_the_dead_voters_left_the_next_sessions_set() {
+        // account [1;32] is still queued for the next session: forcing now would take it along
+        let e = prepare_recover_finality_request(
+            &Chain {
+                best: 400,
+                fin: 100,
+            },
+            &[AccountId::from([1u8; 32])],
+            50,
+        )
+        .unwrap_err();
+        assert!(e.contains("is still in the next session's set"), "{e}");
+        let e = prepare_recover_finality_request(
+            &Chain {
+                best: 400,
+                fin: 100,
+            },
+            &[],
+            50,
+        )
+        .unwrap_err();
+        assert!(e.contains("--dead"), "{e}");
+    }
+
     #[test]
     fn the_request_file_round_trips() {
         let a = acct(1);
         let r = request(&[&a]);
+        assert!(
+            !serde_json::to_string(&r).unwrap().contains("names_reserve"),
+            "old kinds keep their file format"
+        );
+        let n = names_request(&[&a], "madar", false);
+        let pn =
+            std::env::temp_dir().join(format!("madar-committee-n-{}.json", std::process::id()));
+        write_request(&pn, &n).unwrap();
+        assert_eq!(read_request(&pn).unwrap(), n);
+        let _ = std::fs::remove_file(pn);
         let p = std::env::temp_dir().join(format!("madar-committee-{}.json", std::process::id()));
         write_request(&p, &r).unwrap();
         assert_eq!(read_request(&p).unwrap(), r);
