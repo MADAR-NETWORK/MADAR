@@ -2,9 +2,10 @@
 
 **A network owned by the people who run it.**
 
-MADAR is an independent layer-1 blockchain written in Rust on the [Polkadot SDK](https://github.com/paritytech/polkadot-sdk) (Substrate). It gives every approved operator exactly one vote, charges no transaction fees, and has no sudo key: every change to the network's rules requires a 2-of-3 committee approval signed offline.
+MADAR is an independent layer-1 blockchain written in Rust on the [Polkadot SDK](https://github.com/paritytech/polkadot-sdk) (Substrate). It gives every approved operator exactly one vote, charges no transaction fees on the testnet, and has no sudo key: every change to the network's rules requires a 2-of-3 committee approval signed offline.
 
 - Website: https://madar-network.com
+- Whitepaper: https://madar-network.com/whitepaper/ (English and Arabic)
 - Explorer: https://madar-network.com/explorer.html
 - Services: https://madar-network.com/services.html
 - Names: https://madar-network.com/names
