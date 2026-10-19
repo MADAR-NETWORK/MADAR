@@ -1,7 +1,7 @@
 //! MADAR Node 2.0: the public node app for Windows 10/11 x64.
 //!
 //! - Local-only page on `127.0.0.1`: "Account" (name + email, locked after saving), then "Status".
-//! - Runs `madar-node.exe` as a full (non-voting) node with no window, at Below Normal priority, on a share of the cores,
+//! - Runs `madar-node.exe` as a full (non-voting) node (a voting node only after "Enable voting") with no window, at Below Normal priority, on a share of the cores,
 //!   with pruning and limited memory; RPC, metrics and P2P on 127.0.0.1 only (outbound connection to the gateway).
 //! - Sends **only the name, the node-ID suffix and the email** to the MADAR registry once its address is set in `config.json`
 //!   (no password; until then the registration is kept locally and resent automatically).
@@ -31,6 +31,7 @@ mod health;
 mod rewards;
 mod tray;
 mod update_sig;
+mod vote;
 mod winreg;
 
 /// Public key for update signatures (ed25519). The private key is kept outside the repository.
@@ -74,9 +75,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// First gateway: the primary server (full node, non-voting).
 const BOOTNODE: &str =
     "/ip4/188.241.241.253/tcp/30333/p2p/12D3KooWDAr7FDtAeUx51zowWytNKeeuQfB5B2cyF4bZmDEp9j9K";
-/// Second gateway: if the first one is unreachable, the node still joins the network through it.
-const BOOTNODE_BACKUP: &str =
-    "/ip4/188.241.241.234/tcp/30333/p2p/12D3KooWPf6Vv7PPZ9DUeeNZ3YA43pZRAsDaty25KQJ7wGTCLZW4";
+/// Second gateway: a public non-voting door node on the second server (port 30334, since 2026-10-18). The validator
+/// on that server runs with --reserved-only and never gives blocks to public nodes, which is why app nodes used to
+/// stay on a single peer (the primary).
+const BOOTNODE2: &str =
+    "/ip4/188.241.241.234/tcp/30334/p2p/12D3KooWBNq1UxKQJdaNdw6YnWGcs98uZPdyKSDeKPwpXFiFZXgi";
 /// After this long without a new block the page shows likely causes and the support email.
 const STUCK_AFTER: Duration = Duration::from_secs(600);
 const GENESIS: &str = "0xec491025ce422aebac0a5e20fb4c868bb3dacefe56cb051060492ceedd6f5e5c";
@@ -168,6 +171,12 @@ fn ui_lang() -> String {
 /// Native dialog/console message texts by fixed key (English). `_lang` is kept for future localization.
 pub fn msg(key: &str, _lang: &str) -> &'static str {
     match key {
+        // "Enable voting": no uninstall while the node votes.
+        "uninstall_voting" => "MADAR Node cannot be removed now: this node is voting or on its way to voting. Stop voting first and wait until the exit is complete, then remove it again.",
+        // Forced uninstall: the chain cannot be reached now and the last saved phase is candidate/member. The question defaults to "No".
+        "uninstall_force" => "The app cannot confirm from the network right now that this node has stopped voting, and the last saved state says it was a candidate or a member. If you remove the app while it is still a member, it will count as absent and the approval may be withdrawn. Remove it anyway?",
+        // The saved state is missing, an account exists and the network cannot be reached: refused without force.
+        "uninstall_unknown" => "MADAR Node cannot be removed now: the saved voting state on this computer is missing and the network cannot be checked. Open MADAR and choose on the \"Enable voting\" card whether voting should continue or stop on this computer, then remove it again.",
         "spec_missing" => "The chain file is missing. Please reinstall MADAR.",
         "spec_mismatch" => "The chain file does not match its official fingerprint, so the node will not start. Please reinstall MADAR from the official site.",
         "node_missing" => "The node program is missing. Please reinstall MADAR.",
@@ -252,13 +261,28 @@ fn cmd_uninstall() -> i32 {
         );
         return 2;
     }
+    // "Enable voting": no uninstall while voting is wanted or the account is a candidate/member/exiting. The phase is read
+    // from the chain now (through the app if it is running); if that fails and the last saved phase is "started": a forced
+    // uninstall only after an explicit warning.
+    let fresh = app_fresh_phase(&p0);
+    let Some(forced) = uninstall_allowed(
+        &lang,
+        &vote::gate_local(&p0.data),
+        fresh.as_ref().map(|(ph, a)| (ph.as_str(), *a)),
+        None,
+    ) else {
+        return 4;
+    };
     if !ask_yes_no(msg("uninstall_confirm", &lang), "--yes") {
         return 1;
     }
     let delete_data = ask_yes_no(msg("uninstall_data", &lang), "--delete-data");
     let p = paths();
-    // Stop the app and the node if they are running (graceful stop).
-    if try_lock(&p).is_none() {
+    // Stop the app and the node if they are running (graceful stop), then hold the app lock until the end of the
+    // uninstall: the voting thread does not run (or create an account) during the deletion. If the app does not stop in
+    // time: no uninstall (never continue anyway).
+    let mut lock = try_lock(&p);
+    if lock.is_none() {
         if let (Some(ui), Ok(token)) = (
             read_ports(&p).and_then(|v| v["ui"].as_u64()),
             fs::read_to_string(&p.token),
@@ -266,9 +290,25 @@ fn cmd_uninstall() -> i32 {
             let _ = local_call(ui, "POST", "/api/stop", Some(token.trim()));
         }
         let deadline = Instant::now() + NODE_STOP_GRACE + Duration::from_secs(10);
-        while Instant::now() < deadline && try_lock(&p).is_none() {
+        while Instant::now() < deadline && lock.is_none() {
             std::thread::sleep(Duration::from_millis(300));
+            lock = try_lock(&p);
         }
+    }
+    let Some(_lock) = lock else {
+        say("stop_timeout", true);
+        return 1;
+    };
+    // The state may have changed before the app stopped: a second check with the lock held (same phase we read, same forced confirmation).
+    if uninstall_allowed(
+        &lang,
+        &vote::gate_local(&p.data),
+        fresh.as_ref().map(|(ph, a)| (ph.as_str(), *a)),
+        Some(forced),
+    )
+    .is_none()
+    {
+        return 4;
     }
     // Autostart and the "Apps" entry are removed only if they belong to this installation (another copy on the machine is left alone).
     let exe_path = std::env::current_exe()
@@ -298,6 +338,11 @@ fn cmd_uninstall() -> i32 {
         if fs::read(&l).is_ok_and(|b| link_points_to(&b, &exe)) {
             let _ = fs::remove_file(&l);
         }
+    }
+    // "Enable voting": a full deletion first destroys the sealed operator account phrase and the account file (zeros, then
+    // delete), before the folder is deleted.
+    if delete_data {
+        vote::destroy(&p.data);
     }
     // Program files are deleted after this process exits (a running file cannot be deleted). Data is kept unless explicitly requested.
     let root = p.root.display().to_string();
@@ -335,6 +380,48 @@ fn cmd_uninstall() -> i32 {
         false,
     );
     0
+}
+
+/// The phase on the chain now and whether the account is "in the current authority set", from the app if it is running and its node is ready (`/api/vote/phase`).
+/// None = not available (or a reply without `active`).
+fn app_fresh_phase(p: &Paths) -> Option<(String, bool)> {
+    let ui = read_ports(p).and_then(|v| v["ui"].as_u64())?;
+    let token = fs::read_to_string(&p.token).ok()?;
+    let body = local_call_for(ui, "POST", "/api/vote/phase", Some(token.trim()), 150)?;
+    let v = serde_json::from_str::<Value>(&body).ok()?;
+    Some((v["phase"].as_str()?.to_string(), v["active"].as_bool()?))
+}
+
+/// The uninstall decision with its messages. Some(forced) = allowed (forced: after the warning was confirmed); None = refused or declined by the user.
+/// `asked`: the result of the first check in this uninstall (whoever confirmed the warning is not asked a second time).
+fn uninstall_allowed(
+    lang: &str,
+    l: &vote::Local,
+    fresh: Option<(&str, bool)>,
+    asked: Option<bool>,
+) -> Option<bool> {
+    let forced = asked.unwrap_or(false);
+    match vote::uninstall_gate(l, fresh, forced) {
+        vote::Gate::Allow => Some(forced),
+        vote::Gate::Blocked => {
+            notify(
+                msg(
+                    if l.state_lost && fresh.is_none() {
+                        "uninstall_unknown"
+                    } else {
+                        "uninstall_voting"
+                    },
+                    lang,
+                ),
+                true,
+            );
+            None
+        }
+        // The forced warning (defaults to "No"); in the console `--force`.
+        vote::Gate::ForceOffer => {
+            ask_yes_no(msg("uninstall_force", lang), "--force").then_some(true)
+        }
+    }
 }
 
 fn say(key: &str, error: bool) {
@@ -803,7 +890,7 @@ fn rewards_tick(p: &Paths, state: &Arc<Mutex<State>>) {
         let st = state.lock().unwrap();
         (
             st.child.is_some() && st.paused.is_none() && !st.stopping,
-            st.ports.1,
+            rpc_port(&st),
         )
     };
     let cfg = load_config(p);
@@ -1091,12 +1178,23 @@ fn cmd_start() -> i32 {
 }
 
 fn local_call(port: u64, method: &str, path: &str, token: Option<&str>) -> Option<String> {
+    local_call_for(port, method, path, token, 10)
+}
+
+fn local_call_for(
+    port: u64,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    read_secs: u64,
+) -> Option<String> {
     let mut s = TcpStream::connect_timeout(
         &([127, 0, 0, 1], port as u16).into(),
         Duration::from_secs(3),
     )
     .ok()?;
-    s.set_read_timeout(Some(Duration::from_secs(10))).ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(read_secs)))
+        .ok()?;
     let tok = token
         .map(|t| format!("X-Madar-Token: {t}\r\n"))
         .unwrap_or_default();
@@ -1252,6 +1350,75 @@ struct State {
     last_finalized_change: Instant,
     no_peers_since: Option<Instant>,
     last_self_heal: Option<Instant>,
+    /// "Enable voting": the node mode (full / voting), what the card shows (no secrets), and a request for an immediate check.
+    node_mode: vote::NodeMode,
+    vote: Value,
+    vote_kick: bool,
+    /// The "Register new keys for this computer" button (phase "could not verify"): carried out by the voting thread.
+    vote_rekey: bool,
+    /// The node could not be tied to the app's job object: it is not started as a voting node in this run (it might outlive an app crash).
+    job_failed: bool,
+    /// The voting thread stopped the node on purpose to generate the session keys (`join gen-keys`) without holding the lock: the monitor does not restart it.
+    keys_busy: bool,
+}
+
+fn new_state(
+    ports: (u16, u16, u16, u16),
+    token: String,
+    account: Option<Account>,
+    node_mode: vote::NodeMode,
+    vote: Value,
+) -> State {
+    State {
+        ports,
+        token,
+        account,
+        child: None,
+        stopping: false,
+        last_best: None,
+        last_best_change: Instant::now(),
+        node_started: Instant::now(),
+        restarts: 0,
+        last_finalized: None,
+        last_finalized_change: Instant::now(),
+        no_peers_since: None,
+        last_self_heal: None,
+        update: UpdateInfo::default(),
+        last_update_check: Some(Instant::now()),
+        history: std::collections::VecDeque::with_capacity(HISTORY_LEN),
+        blocks_verified: 0,
+        last_counted_best: None,
+        paused: None,
+        crashes: Vec::new(),
+        needs_repair: false,
+        bootstrap: None,
+        disconnected_since: None,
+        disconnect_notified: false,
+        health: json!({}),
+        boot_pending: false,
+        node_mode,
+        vote,
+        vote_kick: false,
+        vote_rekey: false,
+        job_failed: false,
+        keys_busy: false,
+    }
+}
+
+#[cfg(test)]
+fn test_state() -> State {
+    new_state(
+        (17766, 9966, 9636, 30444),
+        "t".into(),
+        None,
+        vote::NodeMode::Full,
+        json!({}),
+    )
+}
+
+/// The RPC port the node listens on (always one safe port; it changes only if another program took it).
+fn rpc_port(st: &State) -> u16 {
+    st.ports.1
 }
 
 /// Stall guard (pure, tested): a node running for at least 10 minutes, and **its finalized block stuck for 10 minutes while its head advances** (gap ≥ 40 blocks),
@@ -1355,22 +1522,93 @@ fn start_node(p: &Paths, st: &mut State) {
         log(p, "cannot open node.log");
         return;
     };
-    let (_, rpc, prom, p2p) = st.ports;
+    let (ui, _, prom, p2p) = st.ports;
+    let rpc = rpc_port(st);
     let help = load_settings(p)["help_network"].as_bool().unwrap_or(false);
-    let args: Vec<String> = vec![
+    // "Enable voting": the mode only adds --validator; RPC is always safe and the limits are the same.
+    let mut args = vote::with_mode(
+        node_args(&p.spec, &p.base, &acc.name, help, ui, rpc, prom, p2p),
+        st.node_mode,
+    );
+    // the node's network identity comes from the app (data\node-key), which signs the "My earnings" messages with it
+    match rewards::load_or_create_key(&p.data) {
+        Ok(_) => args.extend([
+            "--node-key-file".to_string(),
+            rewards::node_key_file(&p.data).display().to_string(),
+        ]),
+        Err(e) => log(p, &format!("node key: {e}")),
+    }
+    // For a graceful stop with Ctrl+C: no CREATE_NEW_PROCESS_GROUP (it disables Ctrl+C in the node), and we re-enable the inherited
+    // Ctrl+C handling (the serve process itself was created in a new group, so it inherited "ignore Ctrl+C").
+    // SAFETY: Win32 call with no pointers.
+    unsafe { SetConsoleCtrlHandler(std::ptr::null(), 0) };
+    match Command::new(&p.node_exe)
+        .args(&args)
+        .current_dir(&p.root)
+        .stdin(Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS)
+        .spawn()
+    {
+        Ok(mut child) => {
+            let _ = fs::write(p.data.join("node.pid"), child.id().to_string());
+            // The node dies with the app if the app crashes (no orphan voter is left behind); stop_orphan_node remains for other cases.
+            if !tie_to_app(&child) {
+                log(p, "node: could not tie the node to the app (job object)");
+                // No voting node without the job object (it could outlive an app crash and two copies would vote): stop it and fall back to a full node.
+                if st.node_mode == vote::NodeMode::Validator {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = fs::remove_file(p.data.join("node.pid"));
+                    log(p, "node: a voting node is refused without the job object; starting a full node instead");
+                    st.job_failed = true;
+                    st.node_mode = vote::NodeMode::Full;
+                    return start_node(p, st);
+                }
+            }
+            limit_cores(p, child.id());
+            log(
+                p,
+                &format!("node started pid {} ({:?})", child.id(), st.node_mode),
+            );
+            st.child = Some(child);
+            st.last_best_change = Instant::now();
+            st.node_started = Instant::now();
+        }
+        Err(e) => log(p, &format!("node spawn failed: {e}")),
+    }
+}
+
+/// Full-node arguments (pure, tested): every resource limit is here, and the voting mode is added on top in `vote::with_mode`.
+#[allow(clippy::too_many_arguments)]
+pub fn node_args(
+    spec: &Path,
+    base: &Path,
+    name: &str,
+    help: bool,
+    ui: u16,
+    rpc: u16,
+    prom: u16,
+    p2p: u16,
+) -> Vec<String> {
+    vec![
         "--chain".into(),
-        p.spec.display().to_string(),
+        spec.display().to_string(),
         "--base-path".into(),
-        p.base.display().to_string(),
+        base.display().to_string(),
         "--name".into(),
-        acc.name,
+        name.to_string(),
         "--bootnodes".into(),
         BOOTNODE.into(),
         "--bootnodes".into(),
-        BOOTNODE_BACKUP.into(),
+        BOOTNODE2.into(),
         // "My earnings": the earnings service counts a node while the main server sees it connected, so keep that link
         "--reserved-nodes".into(),
         BOOTNODE.into(),
+        // and the second gateway is reserved too: two permanent block sources, so one of them dropping or banning us never stalls the node
+        "--reserved-nodes".into(),
+        BOOTNODE2.into(),
         // P2P on 127.0.0.1 only: no port open on the network and no firewall prompt; the connection is outbound to the gateway.
         // "Help the network" (optional): accepts connections from other nodes. Default is 127.0.0.1 only (outbound only).
         "--listen-addr".into(),
@@ -1385,6 +1623,11 @@ fn start_node(p: &Paths, st: &mut State) {
         "safe".into(),
         "--rpc-max-connections".into(),
         "10".into(),
+        // `--rpc-cors` only restricts HTTP requests from the browser (CORS headers): the only allowed origin is the app page instead of the default.
+        // **It does not protect WebSocket**: browsers do not apply CORS to WebSocket and the RPC server does not reject it by origin. The real protection: RPC on
+        // 127.0.0.1 only, and safe methods only (`safe`) in every mode, so no unsafe method can ever be called by a web page.
+        "--rpc-cors".into(),
+        rpc_cors(ui),
         "--prometheus-port".into(),
         prom.to_string(),
         "--no-telemetry".into(),
@@ -1407,38 +1650,93 @@ fn start_node(p: &Paths, st: &mut State) {
         "4096".into(),
         "--max-runtime-instances".into(),
         "2".into(),
-    ];
-    // the node's network identity comes from the app (data\node-key), which signs the "My earnings" messages with it
-    let mut args = args;
-    match rewards::load_or_create_key(&p.data) {
-        Ok(_) => args.extend([
-            "--node-key-file".to_string(),
-            rewards::node_key_file(&p.data).display().to_string(),
-        ]),
-        Err(e) => log(p, &format!("node key: {e}")),
-    }
-    // For a graceful stop with Ctrl+C: no CREATE_NEW_PROCESS_GROUP (it disables Ctrl+C in the node), and we re-enable the inherited
-    // Ctrl+C handling (the serve process itself was created in a new group, so it inherited "ignore Ctrl+C").
-    // SAFETY: Win32 call with no pointers.
-    unsafe { SetConsoleCtrlHandler(std::ptr::null(), 0) };
-    match Command::new(&p.node_exe)
-        .args(&args)
-        .current_dir(&p.root)
-        .stdin(Stdio::null())
-        .stdout(out)
-        .stderr(err)
-        .creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS)
-        .spawn()
-    {
-        Ok(child) => {
-            let _ = fs::write(p.data.join("node.pid"), child.id().to_string());
-            limit_cores(p, child.id());
-            log(p, &format!("node started pid {}", child.id()));
-            st.child = Some(child);
-            st.last_best_change = Instant::now();
-            st.node_started = Instant::now();
+    ]
+}
+
+/// Only the app page's origin for `--rpc-cors` (instead of the default, which allows all of localhost and polkadot.js.org).
+pub fn rpc_cors(ui: u16) -> String {
+    format!("http://127.0.0.1:{ui},http://localhost:{ui}")
+}
+
+// ---------------------------------------------------------------- Job object: the node and its commands die with the app
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateJobObjectW(sa: *mut c_void, name: *const u16) -> *mut c_void;
+    fn SetInformationJobObject(job: *mut c_void, class: i32, info: *const c_void, len: u32) -> i32;
+    fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct JobBasicLimits {
+    per_process_user_time: i64,
+    per_job_user_time: i64,
+    limit_flags: u32,
+    minimum_working_set: usize,
+    maximum_working_set: usize,
+    active_process_limit: u32,
+    affinity: usize,
+    priority_class: u32,
+    scheduling_class: u32,
+}
+
+/// JOBOBJECT_EXTENDED_LIMIT_INFORMATION (144 bytes on x64).
+#[repr(C)]
+#[derive(Default)]
+struct JobExtendedLimits {
+    basic: JobBasicLimits,
+    io: [u64; 6],
+    process_memory_limit: usize,
+    job_memory_limit: usize,
+    peak_process_memory_used: usize,
+    peak_job_memory_used: usize,
+}
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
+
+/// A new job object with no limit except "end all its processes when its last handle is closed". The handle stays with the app until
+/// it exits or crashes, then Windows closes it and everything inside dies with it.
+fn new_kill_on_close_job() -> Option<usize> {
+    // SAFETY: no name and no security attributes (NULL is allowed); the structure is local and its size is correct; the handle is checked before use.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+        if job.is_null() {
+            return None;
         }
-        Err(e) => log(p, &format!("node spawn failed: {e}")),
+        let info = JobExtendedLimits {
+            basic: JobBasicLimits {
+                limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        if SetInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            (&info as *const JobExtendedLimits).cast(),
+            std::mem::size_of::<JobExtendedLimits>() as u32,
+        ) == 0
+        {
+            CloseHandle(job);
+            return None;
+        }
+        Some(job as usize)
+    }
+}
+
+fn job_assign(job: usize, child: &Child) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    // SAFETY: a valid job handle (never closed while the app lives) and a process handle owned by `child`.
+    unsafe { AssignProcessToJobObject(job as *mut c_void, child.as_raw_handle()) != 0 }
+}
+
+/// Puts the child process (the node or a `join` command) into the app's job object.
+pub fn tie_to_app(child: &Child) -> bool {
+    static JOB: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    match JOB.get_or_init(new_kill_on_close_job) {
+        Some(job) => job_assign(*job, child),
+        None => false,
     }
 }
 
@@ -1582,7 +1880,7 @@ fn hex_num(v: &Value) -> Option<u64> {
 
 fn status_json(p: &Paths, st: &mut State) -> Value {
     let alive = node_alive(st);
-    let rpc_port = st.ports.1;
+    let rpc_port = rpc_port(st);
     let health = if alive {
         rpc(rpc_port, "system_health", json!([]))
     } else {
@@ -1648,6 +1946,12 @@ fn status_json(p: &Paths, st: &mut State) -> Value {
         });
     let cfg = load_config(p);
     let settings = load_settings(p);
+    let mut vote_view = st.vote.clone();
+    vote_view["mode"] = json!(if st.node_mode == vote::NodeMode::Full {
+        "full"
+    } else {
+        "validator"
+    });
     let u = &st.update;
     json!({
         "version": VERSION,
@@ -1664,6 +1968,7 @@ fn status_json(p: &Paths, st: &mut State) -> Value {
             "onboarded": settings["onboarded"].as_bool().unwrap_or(false),
         },
         "paused": st.paused, "bootstrap": st.bootstrap,
+        "vote": vote_view,
         "blocks_verified": st.blocks_verified,
         "history": st.history.iter().map(|(t, b, n)| json!([t, b, n])).collect::<Vec<_>>(),
         "health": st.health.clone(),
@@ -1827,7 +2132,7 @@ fn registration_tick(p: &Paths, state: &Arc<Mutex<State>>) {
     let (acc, rpc_port) = {
         let st = state.lock().unwrap();
         match &st.account {
-            Some(a) => (a.clone(), st.ports.1),
+            Some(a) => (a.clone(), rpc_port(&st)),
             None => return,
         }
     };
@@ -1979,7 +2284,8 @@ fn bootstrap_then_start(state: &Arc<Mutex<State>>) {
         }
     }
     let mut st = state.lock().unwrap();
-    if st.account.is_some() && !st.stopping {
+    // keys_busy: the voting thread stopped the node to generate session keys and will restart it itself.
+    if st.account.is_some() && !st.stopping && !st.keys_busy {
         start_node(&p, &mut st);
     }
     st.boot_pending = false;
@@ -2045,7 +2351,8 @@ fn monitor_tick(
     };
 
     let mut st = state.lock().unwrap();
-    if st.account.is_none() || st.bootstrap.is_some() || st.boot_pending {
+    // keys_busy: the node is stopped on purpose to generate session keys: no restart and no power saving until the voting thread is done.
+    if st.account.is_none() || st.bootstrap.is_some() || st.boot_pending || st.keys_busy {
         return;
     }
     // Saver mode
@@ -2083,7 +2390,7 @@ fn monitor_tick(
         }
     }
     // Chart samples + verified blocks
-    let rpc_port = st.ports.1;
+    let rpc_port = rpc_port(&st);
     let alive = node_alive(&mut st);
     let (best, peers) = if alive {
         let h = rpc(rpc_port, "system_health", json!([]));
@@ -2227,34 +2534,11 @@ fn cmd_serve() -> i32 {
     );
     log(&p, &format!("serve {VERSION} ports {ports:?}"));
     stop_orphan_node(&p);
-    let state = Arc::new(Mutex::new(State {
-        ports,
-        token,
-        account: load_account(&p),
-        child: None,
-        stopping: false,
-        last_best: None,
-        last_best_change: Instant::now(),
-        node_started: Instant::now(),
-        restarts: 0,
-        last_finalized: None,
-        last_finalized_change: Instant::now(),
-        no_peers_since: None,
-        last_self_heal: None,
-        update: UpdateInfo::default(),
-        last_update_check: Some(Instant::now()),
-        history: std::collections::VecDeque::with_capacity(HISTORY_LEN),
-        blocks_verified: load_stats(&p),
-        last_counted_best: None,
-        paused: None,
-        crashes: Vec::new(),
-        needs_repair: false,
-        bootstrap: None,
-        disconnected_since: None,
-        disconnect_notified: false,
-        health: json!({}),
-        boot_pending: false,
-    }));
+    let (node_mode, vote_cache) = vote::initial_mode(&p);
+    let vote_view = json!({"stage": "off", "wanted": vote::load_local(&p.data).map(|l| l.wanted).unwrap_or(false), "address": vote::address(&p.data), "has_account_files": vote::any_account_file(&p.data)});
+    let mut st0 = new_state(ports, token, load_account(&p), node_mode, vote_view);
+    st0.blocks_verified = load_stats(&p);
+    let state = Arc::new(Mutex::new(st0));
 
     // Taskbar icon: click = the page; menu = open / stop.
     {
@@ -2315,6 +2599,8 @@ fn cmd_serve() -> i32 {
             }
         });
     }
+    // "Enable voting": a separate thread (its subcommands can take long, like the puzzle) that does not hold the state lock meanwhile.
+    vote::spawn(Arc::clone(&state), vote_cache);
     for stream in listener.incoming().flatten() {
         let state = Arc::clone(&state);
         std::thread::spawn(move || handle(stream, &state));
@@ -2630,7 +2916,7 @@ fn handle(mut s: TcpStream, state: &Arc<Mutex<State>>) {
                     std::thread::spawn(move || {
                         let p = paths();
                         let mut st = st2.lock().unwrap();
-                        if st.child.is_some() {
+                        if st.child.is_some() && !st.keys_busy {
                             stop_node(&p, &mut st);
                             std::thread::sleep(Duration::from_secs(2));
                             st.crashes.clear();
@@ -2722,6 +3008,100 @@ fn handle(mut s: TcpStream, state: &Arc<Mutex<State>>) {
                 }
             }
         }
+        // "Enable voting" / "Stop voting": only the wish is saved, and the voting thread carries out the steps (no secret goes to or from the page).
+        ("POST", "/api/vote/enable") if token_ok => {
+            if state.lock().unwrap().account.is_none() {
+                return respond_json(&mut s, "409 Conflict", json!({"error": "no_account"}));
+            }
+            match vote::set_wanted(&p, state, true) {
+                Ok(()) => respond_json(&mut s, "200 OK", json!({"ok": true})),
+                Err(e) => respond_json(&mut s, "500 Internal Server Error", json!({"error": e})),
+            }
+        }
+        ("POST", "/api/vote/disable") if token_ok => match vote::set_wanted(&p, state, false) {
+            Ok(()) => respond_json(&mut s, "200 OK", json!({"ok": true})),
+            Err(e) => respond_json(&mut s, "500 Internal Server Error", json!({"error": e})),
+        },
+        // "Recreate the operator account": only for a broken account here that has not started on the chain (the voting thread checks the chain again).
+        ("POST", "/api/vote/recreate") if token_ok => match vote::request_recreate(&p, state) {
+            Ok(()) => respond_json(&mut s, "200 OK", json!({"ok": true})),
+            Err("not_allowed") => {
+                respond_json(&mut s, "409 Conflict", json!({"error": "not_allowed"}))
+            }
+            Err(e) => respond_json(&mut s, "500 Internal Server Error", json!({"error": e})),
+        },
+        // "Register new keys for this computer": only in the "could not verify" phase (the old keys are renamed, never deleted).
+        ("POST", "/api/vote/rekey") if token_ok => match vote::request_rekey(state) {
+            Ok(()) => respond_json(&mut s, "200 OK", json!({"ok": true})),
+            Err(e) => respond_json(&mut s, "409 Conflict", json!({"error": e})),
+        },
+        // "Save an encrypted backup": the password goes from the page to the app only, and from it to madar-node through a one-time pipe.
+        // The reply is the encrypted file's text (no plain secret in it), which the page saves where the user chooses.
+        ("POST", "/api/vote/backup") if token_ok => {
+            let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+            let (pw, again) = (
+                v["password"].as_str().unwrap_or(""),
+                v["confirm"].as_str().unwrap_or(""),
+            );
+            if pw != again {
+                return respond_json(
+                    &mut s,
+                    "400 Bad Request",
+                    json!({"error": "password_mismatch"}),
+                );
+            }
+            let secret = match vote::Secret::from_user(pw) {
+                Ok(x) => x,
+                Err(e) => return respond_json(&mut s, "400 Bad Request", json!({"error": e})),
+            };
+            match vote::backup(&p, &secret) {
+                Ok(file) => {
+                    let tail: String = vote::address(&p.data)
+                        .unwrap_or_default()
+                        .chars()
+                        .rev()
+                        .take(6)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    respond_json(
+                        &mut s,
+                        "200 OK",
+                        json!({"ok": true, "file": file, "name": format!("madar-operator-backup-{tail}.json")}),
+                    )
+                }
+                Err(e) => respond_json(&mut s, "409 Conflict", json!({"error": e})),
+            }
+        }
+        // "Restore the account": only on a computer without an operator account.
+        ("POST", "/api/vote/restore") if token_ok => {
+            if state.lock().unwrap().account.is_none() {
+                return respond_json(&mut s, "409 Conflict", json!({"error": "no_account"}));
+            }
+            let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+            let secret = match vote::Secret::from_user(v["password"].as_str().unwrap_or("")) {
+                Ok(x) => x,
+                Err(e) => return respond_json(&mut s, "400 Bad Request", json!({"error": e})),
+            };
+            match vote::restore(&p, state, v["file"].as_str().unwrap_or(""), &secret) {
+                Ok(()) => respond_json(&mut s, "200 OK", json!({"ok": true})),
+                Err(e) => respond_json(&mut s, "409 Conflict", json!({"error": e})),
+            }
+        }
+        // For uninstall: the phase from the chain now, and `active` = the account is in the current authority set (null for both if unavailable).
+        ("POST", "/api/vote/phase") if token_ok => {
+            let fresh = vote::fresh_phase(&p, state);
+            respond_json(
+                &mut s,
+                "200 OK",
+                json!({"phase": fresh.as_ref().map(|f| f.0.clone()), "active": fresh.map(|f| f.1)}),
+            );
+        }
+        ("POST", "/api/vote/check") if token_ok => {
+            state.lock().unwrap().vote_kick = true;
+            respond_json(&mut s, "200 OK", json!({"ok": true}));
+        }
         ("POST", "/api/report") if token_ok => {
             let snapshot = status_json(&p, &mut state.lock().unwrap());
             match make_report(&p, &snapshot) {
@@ -2741,6 +3121,9 @@ fn handle(mut s: TcpStream, state: &Arc<Mutex<State>>) {
             }
         }
         ("POST", "/api/repair") if token_ok => {
+            if state.lock().unwrap().keys_busy {
+                return respond_json(&mut s, "409 Conflict", json!({"error":"keys_busy"}));
+            }
             if !state.lock().unwrap().needs_repair && !req_force(body) {
                 return respond_json(&mut s, "409 Conflict", json!({"error":"no_repair_needed"}));
             }
@@ -2813,6 +3196,43 @@ fn handle(mut s: TcpStream, state: &Arc<Mutex<State>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_node_and_its_commands_die_with_the_app() {
+        assert_eq!(
+            std::mem::size_of::<JobExtendedLimits>(),
+            144,
+            "JOBOBJECT_EXTENDED_LIMIT_INFORMATION on x64"
+        );
+        let job = new_kill_on_close_job().expect("job object");
+        let mut child = Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        assert!(job_assign(job, &child));
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "running inside the job"
+        );
+        // The app crashed = the job's last handle was closed
+        // SAFETY: a handle created by this test and not used after it.
+        unsafe { CloseHandle(job as *mut c_void) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let ended = matches!(child.try_wait(), Ok(Some(_)));
+        if !ended {
+            let _ = child.kill();
+        }
+        assert!(ended, "the child ended with the job");
+        assert_eq!(
+            rpc_cors(17766),
+            "http://127.0.0.1:17766,http://localhost:17766"
+        );
+    }
 
     #[test]
     fn stuck_only_after_ten_minutes_without_a_new_block() {

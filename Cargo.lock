@@ -5891,7 +5891,7 @@ dependencies = [
 
 [[package]]
 name = "madar-app"
-version = "2.0.13"
+version = "2.0.15"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -6038,6 +6038,7 @@ dependencies = [
  "futures",
  "hex",
  "jsonrpsee",
+ "libc",
  "log",
  "madar-admission-api",
  "madar-consensus",
@@ -6131,7 +6132,7 @@ dependencies = [
 
 [[package]]
 name = "madar-setup"
-version = "2.0.13"
+version = "2.0.15"
 dependencies = [
  "miniz_oxide",
  "sha2 0.10.9",

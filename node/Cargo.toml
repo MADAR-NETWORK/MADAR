@@ -76,6 +76,10 @@ substrate-frame-rpc-system = { git = "https://github.com/paritytech/polkadot-sdk
 frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", optional = true }
 frame-benchmarking-cli = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2606-2", optional = true }
 
+# Unix: RocksDB lock check (`fcntl`) before `join gen-keys` (the node must be stopped). Already in the dependency tree.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Android (the mobile node app): OpenSSL is built with the program itself (there is no system library on Android). Does not affect Windows/Linux/macOS.
 [target.'cfg(target_os = "android")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

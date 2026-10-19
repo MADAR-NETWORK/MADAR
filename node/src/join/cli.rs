@@ -4,7 +4,7 @@ use super::account::{self, Account};
 use super::chain::Reader;
 use super::rpc::{HttpRpc, Transport};
 use super::status::{self, JoinStatus};
-use super::{puzzle, tx};
+use super::{backup, puzzle, sessionkeys, tx};
 use madar_consensus::{madar_admission, pallet_session, AccountId, RuntimeCall, SessionKeys};
 use parity_scale_codec::Decode;
 use serde_json::json;
@@ -26,7 +26,15 @@ pub enum JoinCmd {
     /// Join (or re-apply): solves the current round's puzzle and submits it. Requires a vouch from an approved operator first (spec 9, B2).
     Apply(TxArgs),
     /// Register session keys: generated inside the local node's Keystore (they never leave it) and registered on chain with a proof of ownership.
-    RegisterKeys(TxArgs),
+    /// With `--keys` (from `gen-keys`): no generation over RPC; the ownership proof is produced locally from the Keystore files, and the safe RPC is enough.
+    RegisterKeys(RegisterKeysArgs),
+    /// Generate the session keys (BABE + GRANDPA) directly in the node's Keystore **with the node stopped** (refused if it is running), and print only the public
+    /// keys (for `register-keys --keys`). Needs no unsafe RPC.
+    GenKeys(GenKeysArgs),
+    /// An encrypted backup of the operator account with a password you choose (Argon2id), in a file you keep wherever you like.
+    Export(ExportArgs),
+    /// Restore the operator account from an encrypted backup (`export`) into a new account file with a new passphrase.
+    Import(ImportArgs),
     /// Renew membership (extends validity; rejected if too early).
     Renew(TxArgs),
     /// Voluntary exit (takes effect at the next session rotation).
@@ -119,6 +127,65 @@ pub struct StatusArgs {
     /// JSON output (for a UI/script).
     #[arg(long)]
     pub json: bool,
+    /// Optional: if the neighbouring `.pub` file is missing (a half-created account), the public ID is read by decrypting `.enc` with this passphrase (nothing is signed).
+    #[arg(long)]
+    pub passphrase_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct RegisterKeysArgs {
+    #[command(flatten)]
+    pub tx: TxArgs,
+    /// The public keys from `join gen-keys` (SessionKeys encoding, hex). Without it: the older path (`author_rotateKeysWithOwner`).
+    #[arg(long, requires_all = ["base_path", "chain"])]
+    pub keys: Option<String>,
+    /// The node's data folder (the `--base-path` it runs with), to read the Keystore files and produce the ownership proof.
+    #[arg(long)]
+    pub base_path: Option<PathBuf>,
+    /// The chain spec file the node runs with (`--chain`).
+    #[arg(long)]
+    pub chain: Option<String>,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct GenKeysArgs {
+    /// The node's data folder (the same `--base-path`). The node must be stopped.
+    #[arg(long)]
+    pub base_path: PathBuf,
+    /// The chain spec file (the same `--chain`), or dev/local.
+    #[arg(long)]
+    pub chain: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct ExportArgs {
+    #[arg(long)]
+    pub account_file: PathBuf,
+    #[arg(long)]
+    pub passphrase_file: Option<PathBuf>,
+    /// A file (or a one-time pipe) holding the backup password (at least 12 characters). Without it, it is asked for with no echo and confirmed.
+    #[arg(long)]
+    pub backup_pass_file: Option<PathBuf>,
+    /// The new backup file (an existing file is never replaced).
+    #[arg(long)]
+    pub out: PathBuf,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct ImportArgs {
+    /// The backup file (from `join export`).
+    #[arg(long = "in")]
+    pub input: PathBuf,
+    #[arg(long)]
+    pub backup_pass_file: Option<PathBuf>,
+    /// The new account file (`.enc`; a `.pub` is written next to it). Never replaced.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// The passphrase for the new account file (at least 12 characters).
+    #[arg(long)]
+    pub passphrase_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -146,7 +213,76 @@ pub fn run(cmd: JoinCmd) -> Result<(), String> {
         JoinCmd::RotateKeys(a) => rotate_keys(a),
         JoinCmd::Vouch(a) => vouch(a),
         JoinCmd::AutoRenew(a) => auto_renew(a),
+        JoinCmd::GenKeys(a) => gen_keys(a),
+        JoinCmd::Export(a) => export(a),
+        JoinCmd::Import(a) => import(a),
     }
+}
+
+fn gen_keys(a: GenKeysArgs) -> Result<(), String> {
+    let g = sessionkeys::gen_keys(&a.base_path, &a.chain)?;
+    if a.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&g.to_json()).map_err(|e| e.to_string())?
+        );
+    } else {
+        println!("Session keys were generated in the node's Keystore (only the public keys are shown here):");
+        println!(
+            "  keys (for register-keys --keys): 0x{}",
+            hex::encode(g.encoded())
+        );
+        println!("  babe: 0x{}", hex::encode(g.babe));
+        println!("  grandpa: 0x{}", hex::encode(g.grandpa));
+        println!("Next step: start the node with --validator (the safe RPC is enough), then:");
+        println!("  madar-node join register-keys --account-file <account file> --keys 0x{} --base-path {} --chain {}", hex::encode(g.encoded()), a.base_path.display(), a.chain);
+    }
+    Ok(())
+}
+
+fn export(a: ExportArgs) -> Result<(), String> {
+    if a.out.exists() {
+        return Err(format!(
+            "{} already exists — it will not be replaced.",
+            a.out.display()
+        ));
+    }
+    let pass = account::read_passphrase(a.passphrase_file.as_deref(), false)?;
+    let backup_pass =
+        account::read_secret_line(a.backup_pass_file.as_deref(), "Backup password: ", true)?;
+    let (id, text) = backup::export(&a.account_file, &pass, &backup_pass)?;
+    madar_keystore::create_new_secret_file(&a.out, text.as_bytes())
+        .map_err(|e| format!("Could not write {}: {e}", a.out.display()))?;
+    println!(
+        "An encrypted backup of account {} was saved to {}",
+        id.to_ss58check(),
+        a.out.display()
+    );
+    println!("It can only be restored with its password; keep the file and the password in two separate places.");
+    Ok(())
+}
+
+fn import(a: ImportArgs) -> Result<(), String> {
+    let meta = std::fs::metadata(&a.input)
+        .map_err(|e| format!("Could not read {}: {e}", a.input.display()))?;
+    if meta.len() as usize > backup::MAX_BACKUP {
+        return Err("The backup file is larger than expected — it is not a MADAR backup.".into());
+    }
+    let bytes = zeroize::Zeroizing::new(
+        std::fs::read(&a.input)
+            .map_err(|e| format!("Could not read {}: {e}", a.input.display()))?,
+    );
+    let backup_pass =
+        account::read_secret_line(a.backup_pass_file.as_deref(), "Backup password: ", false)?;
+    let pass = account::read_passphrase(a.passphrase_file.as_deref(), true)?;
+    let id = backup::import(&bytes, &backup_pass, &a.out, &pass)?;
+    println!(
+        "Account {} was restored to {}",
+        id.to_ss58check(),
+        a.out.display()
+    );
+    println!("Register new session keys for this computer before voting from it (gen-keys, then register-keys --keys).");
+    Ok(())
 }
 
 fn new_account(a: NewAccountArgs) -> Result<(), String> {
@@ -167,9 +303,21 @@ fn new_account(a: NewAccountArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn who_from(account_file: &Option<PathBuf>, address: &Option<String>) -> Result<AccountId, String> {
+fn who_from(
+    account_file: &Option<PathBuf>,
+    address: &Option<String>,
+    passphrase_file: &Option<PathBuf>,
+) -> Result<AccountId, String> {
     match (account_file, address) {
+        // A half-created account (`.pub` missing): the ID comes from decrypting `.enc` if the passphrase is given (read only, no signing).
+        (Some(f), _) if !account::pub_path(f).exists() && passphrase_file.is_some() => {
+            let pass = account::read_passphrase(passphrase_file.as_deref(), false)?;
+            Ok(Account::load(f, &pass)?.id())
+        }
         (Some(f), _) => account::read_public(f),
+        (None, Some(_)) if passphrase_file.is_some() => {
+            Err("--passphrase-file is only used with --account-file".into())
+        }
         (None, Some(a)) => account::parse_address(a),
         (None, None) => Err("Specify --account-file or --address".into()),
     }
@@ -208,16 +356,34 @@ fn print_status(who: &AccountId, s: &JoinStatus) {
 }
 
 fn show_status(a: StatusArgs) -> Result<(), String> {
-    let who = who_from(&a.account_file, &a.address)?;
-    let s = snapshot(&HttpRpc::new(&a.rpc), &who)?;
+    let who = who_from(&a.account_file, &a.address, &a.passphrase_file)?;
+    let t = HttpRpc::new(&a.rpc);
     if a.json {
-        let out = json!({"account": who.to_ss58check(), "status": s});
+        // The node app (the "Enable voting" button) reads these two fields to know whether to vouch and apply, or wait for committee approval. Read only,
+        // at the same block the status was read at; if they cannot be read they are null (the whole command does not fail: dashboards read only "status").
+        let r = Reader::at_best(&t)?;
+        let (view, params) = r.view(&who)?;
+        let s = status::interpret(&view, params);
+        let flag = |key: Vec<u8>| -> Option<bool> {
+            t.call(
+                "state_getStorage",
+                json!([format!("0x{}", hex::encode(key)), r.at]),
+            )
+            .ok()
+            .map(|v| !v.is_null())
+        };
+        let out = json!({
+            "account": who.to_ss58check(),
+            "status": s,
+            "operator_approved": flag(madar_admission::ApprovedOperators::<madar_consensus::Runtime>::hashed_key_for(&who)),
+            "vouched": flag(madar_admission::NodeOperator::<madar_consensus::Runtime>::hashed_key_for(&who)),
+        });
         println!(
             "{}",
             serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
         );
     } else {
-        print_status(&who, &s);
+        print_status(&who, &snapshot(&t, &who)?);
     }
     Ok(())
 }
@@ -496,7 +662,55 @@ fn submit_solution(t: &HttpRpc, acct: &Account) -> Result<(), String> {
     Err("The round seed changed on every attempt — try again (is the network switching Epochs quickly?).".into())
 }
 
-fn register_keys(a: TxArgs) -> Result<(), String> {
+fn register_keys(r: RegisterKeysArgs) -> Result<(), String> {
+    match (&r.keys, &r.base_path, &r.chain) {
+        (Some(keys), Some(base), Some(chain)) => register_local_keys(&r.tx, keys, base, chain),
+        (None, _, _) => register_keys_via_node(r.tx),
+        _ => Err("--keys needs --base-path and --chain".into()),
+    }
+}
+
+/// `register-keys --keys`: the keys were generated with `gen-keys` in the node's Keystore; the proof is produced and checked here, and the safe RPC is enough.
+fn register_local_keys(
+    a: &TxArgs,
+    keys_hex: &str,
+    base: &std::path::Path,
+    chain: &str,
+) -> Result<(), String> {
+    let g = sessionkeys::parse_keys(keys_hex)?;
+    let dir = sessionkeys::keystore_dir(base, &sessionkeys::chain_id(chain)?)?;
+    // Both files exist before anything else (no registration of keys this node does not own).
+    for n in g.file_names() {
+        if !dir.join(&n).is_file() {
+            return Err(format!(
+                "Key {n} is not in this node's Keystore ({}) — it will not be registered.",
+                dir.display()
+            ));
+        }
+    }
+    let ctx = context(&a.rpc, &a.account_file, a.yes)?;
+    status::gate_register_keys(&ctx.s)?;
+    let proof = sessionkeys::ownership_proof(&dir, &g, &ctx.who)?;
+    confirm(&ctx, "Register the session keys generated in this node's Keystore on chain with a local ownership proof. The private keys never leave this computer.")?;
+    let acct = load_account(&a.account_file, &a.passphrase_file, &ctx.who)?;
+    let hash = tx::submit(
+        &ctx.t,
+        &acct,
+        RuntimeCall::Session(pallet_session::Call::set_keys {
+            keys: g.session_keys(),
+            proof,
+        }),
+    )?;
+    println!("Session keys registered (only the public keys appear on chain): {hash}");
+    println!(
+        "Check after inclusion: madar-node join status --account-file {} --rpc {}",
+        a.account_file.display(),
+        a.rpc
+    );
+    Ok(())
+}
+
+fn register_keys_via_node(a: TxArgs) -> Result<(), String> {
     let ctx = context(&a.rpc, &a.account_file, a.yes)?;
     if !ctx.t.is_loopback() {
         return Err("register-keys must run on the Validator node's own machine (local RPC): session keys are generated inside the node's Keystore via unsafe RPC, which must never be exposed to the network.".into());
@@ -666,5 +880,126 @@ fn rotate_keys(a: RotateArgs) -> Result<(), String> {
             return Err("Timed out waiting for activation — nothing was deleted; rerun the same command to continue.".into());
         }
         std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Join {
+        #[command(subcommand)]
+        c: JoinCmd,
+    }
+
+    fn parse(args: &[&str]) -> Result<JoinCmd, clap::Error> {
+        Join::try_parse_from(std::iter::once("join").chain(args.iter().copied())).map(|j| j.c)
+    }
+
+    #[test]
+    fn the_old_command_lines_keep_working_and_the_new_ones_parse() {
+        // As in the operator scripts and the documentation: unchanged
+        let old = parse(&[
+            "register-keys",
+            "--rpc",
+            "127.0.0.1:9944",
+            "--account-file",
+            "a.enc",
+            "--passphrase-file",
+            "p",
+            "--yes",
+        ])
+        .unwrap();
+        assert!(matches!(
+            old,
+            JoinCmd::RegisterKeys(RegisterKeysArgs { keys: None, .. })
+        ));
+        assert!(parse(&[
+            "status",
+            "--rpc",
+            "127.0.0.1:9944",
+            "--account-file",
+            "op.enc"
+        ])
+        .is_ok());
+        // The new form: the public keys + the Keystore location
+        let new = parse(&[
+            "register-keys",
+            "--account-file",
+            "a.enc",
+            "--keys",
+            "0xab",
+            "--base-path",
+            "b",
+            "--chain",
+            "c",
+            "--yes",
+        ])
+        .unwrap();
+        assert!(matches!(
+            new,
+            JoinCmd::RegisterKeys(RegisterKeysArgs {
+                keys: Some(_),
+                base_path: Some(_),
+                chain: Some(_),
+                ..
+            })
+        ));
+        assert!(
+            parse(&["register-keys", "--account-file", "a.enc", "--keys", "0xab"]).is_err(),
+            "--keys needs the keystore location"
+        );
+        assert!(matches!(
+            parse(&["gen-keys", "--base-path", "b", "--chain", "c", "--json"]).unwrap(),
+            JoinCmd::GenKeys(GenKeysArgs { json: true, .. })
+        ));
+        assert!(parse(&["gen-keys", "--chain", "c"]).is_err());
+        assert!(parse(&[
+            "export",
+            "--account-file",
+            "a",
+            "--passphrase-file",
+            "p",
+            "--backup-pass-file",
+            "q",
+            "--out",
+            "o"
+        ])
+        .is_ok());
+        assert!(parse(&[
+            "import",
+            "--in",
+            "f",
+            "--backup-pass-file",
+            "q",
+            "--out",
+            "o",
+            "--passphrase-file",
+            "p"
+        ])
+        .is_ok());
+        assert!(
+            parse(&[
+                "status",
+                "--account-file",
+                "a",
+                "--json",
+                "--passphrase-file",
+                "p"
+            ])
+            .is_ok(),
+            "a half-created account"
+        );
+        assert!(
+            who_from(
+                &None,
+                &Some(format!("0x{}", "00".repeat(32))),
+                &Some(PathBuf::from("p"))
+            )
+            .is_err(),
+            "the passphrase only goes with an account file"
+        );
     }
 }

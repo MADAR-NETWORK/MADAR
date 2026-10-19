@@ -68,7 +68,7 @@ header img{width:44px;height:44px;border-radius:50%;flex:none;box-shadow:0 0 18p
 
 /* forms */
 label.fld{display:block;font-weight:600;margin:14px 0 6px;font-size:14px}
-input[type=text],input[type=email]{width:100%;padding:11px 13px;font:inherit;border:1px solid var(--border);border-radius:11px;background:var(--surface-2);color:var(--ink);outline:none;transition:border-color .2s,box-shadow .2s}
+input[type=text],input[type=email],input[type=password]{width:100%;padding:11px 13px;font:inherit;border:1px solid var(--border);border-radius:11px;background:var(--surface-2);color:var(--ink);outline:none;transition:border-color .2s,box-shadow .2s}
 input:focus{border-color:var(--brand-b);box-shadow:0 0 0 3px color-mix(in srgb,var(--brand-b) 20%,transparent)}
 input[type=email]{direction:ltr}
 .hint{color:var(--mute);font-size:13px;margin:6px 0 0}
@@ -164,7 +164,7 @@ footer{color:var(--mute);font-size:12px;text-align:center;margin-top:18px}
         <p class="state" id="state"></p>
         <p class="sentence" id="sentence"></p>
         <p class="eta" id="eta" hidden></p>
-        <span class="chip" data-t="role"></span>
+        <span class="chip" id="role-chip" data-t="role"></span>
       </div>
     </div>
     <div class="stats">
@@ -218,6 +218,54 @@ footer{color:var(--mute);font-size:12px;text-align:center;margin-top:18px}
       <div id="earn-camp" hidden><p class="hint" id="earn-camp-text"></p><button class="primary" id="earn-camp-btn" hidden data-t="camp_btn"></button></div>
       <p class="hint" data-t="earn_kept"></p>
     </div>
+  </section>
+
+  <!-- "Enable voting" (2.0.14): the approved operator's node becomes a voting node; the app runs every step (no secret is ever shown here) -->
+  <section class="card" id="vote-card" hidden>
+    <h2 data-t="vote_title"></h2>
+    <p class="sentence" id="vote-stage" hidden></p>
+    <p class="hint" id="vote-intro" data-t="vote_intro"></p>
+    <div id="vote-addr-box" hidden>
+      <p class="hint" data-t="vote_address"></p>
+      <p><code id="vote-addr" dir="ltr" style="word-break:break-all"></code></p>
+      <button id="vote-copy" data-t="vote_copy"></button>
+    </div>
+    <div id="vote-send" hidden><p class="hint"><b data-t="vote_send"></b></p><p class="hint" data-t="vote_poll"></p></div>
+    <p class="hint" id="vote-expiry" hidden></p>
+    <div class="note"><b data-t="vote_stay"></b></div>
+    <div class="err" id="vote-err"></div>
+    <div class="row" style="margin-top:14px">
+      <button class="primary" id="vote-on" data-t="vote_on_btn"></button>
+      <button class="danger" id="vote-off" data-t="vote_off_btn" hidden></button>
+      <button id="vote-recreate" data-t="vote_recreate_btn" hidden></button>
+      <button id="vote-rekey" data-t="vote_rekey_btn" hidden></button>
+    </div>
+    <p class="hint" id="vote-recreate-hint" data-t="vote_recreate_hint" hidden></p>
+    <p class="hint" id="vote-rekey-hint" data-t="vote_rekey_hint" hidden></p>
+    <!-- opt-in encrypted backup / restore of the operator account: the passwords go only to the app, then to madar-node through a one-time pipe; the account secret is never shown -->
+    <details id="vote-backup" hidden style="margin-top:14px">
+      <summary data-t="vote_backup_title"></summary>
+      <p class="hint" data-t="vote_backup_hint"></p>
+      <p class="hint"><b data-t="vote_clone_warn"></b></p>
+      <label class="fld" for="vote-bk-pass" data-t="vote_backup_pass"></label>
+      <input id="vote-bk-pass" type="password" maxlength="256" autocomplete="new-password">
+      <label class="fld" for="vote-bk-pass2" data-t="vote_backup_pass2"></label>
+      <input id="vote-bk-pass2" type="password" maxlength="256" autocomplete="new-password">
+      <div class="row" style="margin-top:10px"><button id="vote-bk-save" data-t="vote_backup_save"></button></div>
+      <div class="err" id="vote-bk-err"></div>
+      <p class="hint" id="vote-bk-done" data-t="vote_backup_done" hidden></p>
+    </details>
+    <details id="vote-restore" hidden style="margin-top:14px">
+      <summary data-t="vote_restore_title"></summary>
+      <p class="hint" data-t="vote_restore_hint"></p>
+      <p class="hint"><b data-t="vote_clone_warn"></b></p>
+      <label class="fld" for="vote-rs-file" data-t="vote_restore_file"></label>
+      <input id="vote-rs-file" type="file" accept=".json,application/json">
+      <label class="fld" for="vote-rs-pass" data-t="vote_restore_pass"></label>
+      <input id="vote-rs-pass" type="password" maxlength="256" autocomplete="off">
+      <div class="row" style="margin-top:10px"><button id="vote-rs-btn" data-t="vote_restore_btn"></button></div>
+      <div class="err" id="vote-rs-err"></div>
+    </details>
   </section>
 
   <!-- account: form, then locked view -->
@@ -383,9 +431,34 @@ Object.assign(I18N.fr, {camp_days:"{v} jours vers votre nom .madar gratuit",camp
 Object.assign(I18N.es, {camp_days:"{v} días para tu nombre .madar gratis",camp_ready:"Completaste 7 días: tu nombre .madar gratis está listo.",camp_btn:"Obtener mi nombre gratis",camp_claimed:"Tu nombre gratis: {v}",camp_founder:"Fundador #{v}"});
 Object.assign(I18N.tr, {camp_days:"Ücretsiz .madar adınıza {v} gün",camp_ready:"7 günü tamamladınız: ücretsiz .madar adınız hazır.",camp_btn:"Ücretsiz adımı al",camp_claimed:"Ücretsiz adınız: {v}",camp_founder:"Kurucu #{v}"});
 Object.assign(I18N.id, {camp_days:"{v} hari menuju nama .madar gratis Anda",camp_ready:"Anda menyelesaikan 7 hari: nama .madar gratis Anda siap.",camp_btn:"Ambil nama gratis saya",camp_claimed:"Nama gratis Anda: {v}",camp_founder:"Pendiri #{v}"});
+// "Enable voting" (2.0.14)
+Object.assign(I18N.en, {vote_title:"Enable voting",vote_intro:"If the committee approves you as an operator, this node becomes a voting node that helps finalize blocks. The app does every step by itself.",vote_stay:"Your voting node must stay connected; a long absence leads to the approval being withdrawn.",vote_on_btn:"Enable voting",vote_off_btn:"Stop voting",vote_confirm_on:"The app will create an operator account on this computer and keep it protected, then show its address for you to send to us. Continue?",vote_confirm_off:"Stop voting? The app registers your exit from the voters, then the node becomes a full node again.",vote_address:"Operator account address",vote_copy:"Copy",vote_copied:"Copied",vote_send:"Send this address with your account name to contact@madar-network.com",vote_poll:"The app checks for the approval every few minutes, then continues by itself. The app never sends any email itself.",vote_expiry:"Membership ends at session {v}; the app renews it by itself two days before.",vote_err:"The last step did not complete; the app will try again by itself.",role_voting:"Voting node",e_no_account:"Save your account first.",
+vs_creating:"Creating the operator account…",vs_awaiting_approval:"Waiting for your account to be approved as an operator.",vs_needs_newer_node:"Waiting for the approval. A newer node program is needed to continue after the approval.",vs_vouching:"Vouching for the node…",vs_applying:"Applying to vote — this can take a few minutes…",vs_registering_keys:"Registering the voting keys…",vs_waiting_draw:"Your node is a candidate and is waiting for the draw.",vs_voting:"Your node is voting.",vs_renewing:"Renewing the membership…",vs_exiting:"Stopping voting. The node keeps voting until the exit is complete.",vs_refused_banned:"Voting cannot be enabled: this account is banned from voting for an earlier violation.",vs_refused_other_device:"Voting cannot be enabled: this account is registered to vote from another computer. Each operator has one voting node.",vs_node_not_ready:"Waiting for the node to connect and sync."});
+Object.assign(I18N.fr, {vote_title:"Activer le vote",vote_intro:"Si le comité vous approuve comme opérateur, ce nœud devient un nœud votant qui aide à finaliser les blocs. L'application fait chaque étape elle-même.",vote_stay:"Votre nœud votant doit rester connecté ; une longue absence entraîne le retrait de l'approbation.",vote_on_btn:"Activer le vote",vote_off_btn:"Arrêter le vote",vote_confirm_on:"L'application va créer un compte d'opérateur sur cet ordinateur et le garder protégé, puis afficher son adresse pour que vous nous l'envoyiez. Continuer ?",vote_confirm_off:"Arrêter le vote ? L'application enregistre votre sortie des votants, puis le nœud redevient un nœud complet.",vote_address:"Adresse du compte d'opérateur",vote_copy:"Copier",vote_copied:"Copié",vote_send:"Envoyez cette adresse avec le nom de votre compte à contact@madar-network.com",vote_poll:"L'application vérifie l'approbation toutes les quelques minutes, puis continue d'elle-même. L'application n'envoie jamais d'e-mail elle-même.",vote_expiry:"L'adhésion se termine à la session {v} ; l'application la renouvelle d'elle-même deux jours avant.",vote_err:"La dernière étape ne s'est pas terminée ; l'application réessaiera d'elle-même.",role_voting:"Nœud votant",e_no_account:"Enregistrez d'abord votre compte.",
+vs_creating:"Création du compte d'opérateur…",vs_awaiting_approval:"En attente de l'approbation de votre compte comme opérateur.",vs_needs_newer_node:"En attente de l'approbation. Une version plus récente du programme du nœud est nécessaire pour continuer après l'approbation.",vs_vouching:"Garantie du nœud…",vs_applying:"Candidature au vote — cela peut prendre quelques minutes…",vs_registering_keys:"Enregistrement des clés de vote…",vs_waiting_draw:"Votre nœud est candidat et attend le tirage.",vs_voting:"Votre nœud vote.",vs_renewing:"Renouvellement de l'adhésion…",vs_exiting:"Arrêt du vote. Le nœud continue de voter jusqu'à la fin de la sortie.",vs_refused_banned:"Le vote ne peut pas être activé : ce compte est exclu du vote pour une infraction antérieure.",vs_refused_other_device:"Le vote ne peut pas être activé : ce compte est enregistré pour voter depuis un autre ordinateur. Chaque opérateur a un seul nœud votant.",vs_node_not_ready:"En attente de la connexion et de la synchronisation du nœud."});
+Object.assign(I18N.es, {vote_title:"Activar la votación",vote_intro:"Si el comité te aprueba como operador, este nodo se convierte en un nodo votante que ayuda a finalizar bloques. La aplicación hace cada paso por sí sola.",vote_stay:"Tu nodo votante debe permanecer conectado; una ausencia larga lleva a retirar la aprobación.",vote_on_btn:"Activar la votación",vote_off_btn:"Detener la votación",vote_confirm_on:"La aplicación creará una cuenta de operador en este equipo y la mantendrá protegida; luego mostrará su dirección para que nos la envíes. ¿Continuar?",vote_confirm_off:"¿Detener la votación? La aplicación registra tu salida de los votantes y el nodo vuelve a ser un nodo completo.",vote_address:"Dirección de la cuenta de operador",vote_copy:"Copiar",vote_copied:"Copiado",vote_send:"Envía esta dirección con el nombre de tu cuenta a contact@madar-network.com",vote_poll:"La aplicación comprueba la aprobación cada pocos minutos y luego continúa por sí sola. La aplicación nunca envía correos por sí misma.",vote_expiry:"La membresía termina en la sesión {v}; la aplicación la renueva sola dos días antes.",vote_err:"El último paso no se completó; la aplicación lo intentará de nuevo sola.",role_voting:"Nodo votante",e_no_account:"Guarda primero tu cuenta.",
+vs_creating:"Creando la cuenta de operador…",vs_awaiting_approval:"Esperando la aprobación de tu cuenta como operador.",vs_needs_newer_node:"Esperando la aprobación. Se necesita una versión más reciente del programa del nodo para continuar después de la aprobación.",vs_vouching:"Avalando el nodo…",vs_applying:"Solicitando votar — puede tardar unos minutos…",vs_registering_keys:"Registrando las claves de votación…",vs_waiting_draw:"Tu nodo es candidato y espera el sorteo.",vs_voting:"Tu nodo está votando.",vs_renewing:"Renovando la membresía…",vs_exiting:"Deteniendo la votación. El nodo sigue votando hasta que se complete la salida.",vs_refused_banned:"No se puede activar la votación: esta cuenta está excluida por una infracción anterior.",vs_refused_other_device:"No se puede activar la votación: esta cuenta está registrada para votar desde otro equipo. Cada operador tiene un solo nodo votante.",vs_node_not_ready:"Esperando a que el nodo se conecte y se sincronice."});
+Object.assign(I18N.tr, {vote_title:"Oylamayı etkinleştir",vote_intro:"Komite sizi operatör olarak onaylarsa bu düğüm, blokların kesinleşmesine yardım eden oy veren bir düğüme dönüşür. Uygulama her adımı kendisi yapar.",vote_stay:"Oy veren düğümünüz bağlı kalmalıdır; uzun bir yokluk onayın geri alınmasına yol açar.",vote_on_btn:"Oylamayı etkinleştir",vote_off_btn:"Oylamayı durdur",vote_confirm_on:"Uygulama bu bilgisayarda bir operatör hesabı oluşturup korumalı olarak saklayacak, ardından bize göndermeniz için adresini gösterecek. Devam edilsin mi?",vote_confirm_off:"Oylama durdurulsun mu? Uygulama oy verenlerden çıkışınızı kaydeder, ardından düğüm yeniden tam düğüm olur.",vote_address:"Operatör hesabı adresi",vote_copy:"Kopyala",vote_copied:"Kopyalandı",vote_send:"Bu adresi hesap adınızla birlikte contact@madar-network.com adresine gönderin",vote_poll:"Uygulama onayı birkaç dakikada bir kontrol eder, sonra kendisi devam eder. Uygulama asla kendisi e-posta göndermez.",vote_expiry:"Üyelik {v}. oturumda biter; uygulama iki gün önce kendisi yeniler.",vote_err:"Son adım tamamlanmadı; uygulama kendisi yeniden deneyecek.",role_voting:"Oy veren düğüm",e_no_account:"Önce hesabınızı kaydedin.",
+vs_creating:"Operatör hesabı oluşturuluyor…",vs_awaiting_approval:"Hesabınızın operatör olarak onaylanması bekleniyor.",vs_needs_newer_node:"Onay bekleniyor. Onaydan sonra devam etmek için düğüm programının daha yeni bir sürümü gerekiyor.",vs_vouching:"Düğüme kefil olunuyor…",vs_applying:"Oylamaya başvuruluyor — bu birkaç dakika sürebilir…",vs_registering_keys:"Oylama anahtarları kaydediliyor…",vs_waiting_draw:"Düğümünüz aday ve kurayı bekliyor.",vs_voting:"Düğümünüz oy veriyor.",vs_renewing:"Üyelik yenileniyor…",vs_exiting:"Oylama durduruluyor. Çıkış tamamlanana kadar düğüm oy vermeye devam eder.",vs_refused_banned:"Oylama etkinleştirilemez: bu hesap önceki bir ihlal nedeniyle oylamadan men edildi.",vs_refused_other_device:"Oylama etkinleştirilemez: bu hesap başka bir bilgisayardan oy vermek için kayıtlı. Her operatörün tek bir oy veren düğümü olur.",vs_node_not_ready:"Düğümün bağlanması ve eşitlenmesi bekleniyor."});
+Object.assign(I18N.id, {vote_title:"Aktifkan pemungutan suara",vote_intro:"Jika komite menyetujui Anda sebagai operator, node ini menjadi node pemberi suara yang membantu memfinalisasi blok. Aplikasi menjalankan setiap langkah sendiri.",vote_stay:"Node pemberi suara Anda harus tetap terhubung; ketidakhadiran yang lama membuat persetujuan dicabut.",vote_on_btn:"Aktifkan pemungutan suara",vote_off_btn:"Hentikan pemungutan suara",vote_confirm_on:"Aplikasi akan membuat akun operator di komputer ini dan menyimpannya dengan aman, lalu menampilkan alamatnya untuk Anda kirimkan kepada kami. Lanjutkan?",vote_confirm_off:"Hentikan pemungutan suara? Aplikasi mencatat keluarnya Anda dari pemberi suara, lalu node kembali menjadi node penuh.",vote_address:"Alamat akun operator",vote_copy:"Salin",vote_copied:"Tersalin",vote_send:"Kirim alamat ini beserta nama akun Anda ke contact@madar-network.com",vote_poll:"Aplikasi memeriksa persetujuan setiap beberapa menit, lalu melanjutkan sendiri. Aplikasi tidak pernah mengirim email sendiri.",vote_expiry:"Keanggotaan berakhir pada sesi {v}; aplikasi memperbaruinya sendiri dua hari sebelumnya.",vote_err:"Langkah terakhir belum selesai; aplikasi akan mencoba lagi sendiri.",role_voting:"Node pemberi suara",e_no_account:"Simpan akun Anda terlebih dahulu.",
+vs_creating:"Membuat akun operator…",vs_awaiting_approval:"Menunggu akun Anda disetujui sebagai operator.",vs_needs_newer_node:"Menunggu persetujuan. Diperlukan versi program node yang lebih baru untuk melanjutkan setelah persetujuan.",vs_vouching:"Menjamin node…",vs_applying:"Mendaftar untuk memberi suara — ini bisa memakan beberapa menit…",vs_registering_keys:"Mendaftarkan kunci pemungutan suara…",vs_waiting_draw:"Node Anda adalah kandidat dan menunggu undian.",vs_voting:"Node Anda sedang memberi suara.",vs_renewing:"Memperbarui keanggotaan…",vs_exiting:"Menghentikan pemungutan suara. Node tetap memberi suara sampai proses keluar selesai.",vs_refused_banned:"Pemungutan suara tidak dapat diaktifkan: akun ini dilarang memberi suara karena pelanggaran sebelumnya.",vs_refused_other_device:"Pemungutan suara tidak dapat diaktifkan: akun ini terdaftar untuk memberi suara dari komputer lain. Setiap operator hanya memiliki satu node pemberi suara.",vs_node_not_ready:"Menunggu node terhubung dan tersinkron."});
+// "Enable voting" — security review 2026-10-17: stuck steps, an unusable operator account, a foreign program on the node's port
+Object.assign(I18N.en, {vs_stuck:"A voting step has failed several times in a row. The app keeps trying, at longer intervals. If this continues, send a problem report.",vs_account_broken:"The operator account on this computer cannot be used: it is incomplete, or it was made under another Windows account or on another computer. Voting cannot continue with it.",vs_rpc_not_ours:"Another program is answering on the node's local port, so the app stopped the voting steps for your safety. Restart the computer, then open MADAR again.",vote_recreate_btn:"Re-create the operator account",vote_recreate_hint:"This is possible because the account has not started anything on the network yet.",vote_confirm_recreate:"The app will set the unusable account files aside and create a new operator account with a new address. Then send the new address to us for approval. Continue?",e_not_allowed:"This action is not available now."});
+Object.assign(I18N.fr, {vs_stuck:"Une étape du vote a échoué plusieurs fois de suite. L'application continue d'essayer, à des intervalles plus longs. Si cela persiste, envoyez un rapport de problème.",vs_account_broken:"Le compte d'opérateur de cet ordinateur est inutilisable : il est incomplet, ou il a été créé avec un autre compte Windows ou sur un autre ordinateur. Le vote ne peut pas continuer avec ce compte.",vs_rpc_not_ours:"Un autre programme répond sur le port local du nœud ; l'application a donc arrêté les étapes du vote pour votre sécurité. Redémarrez l'ordinateur, puis rouvrez MADAR.",vote_recreate_btn:"Recréer le compte d'opérateur",vote_recreate_hint:"C'est possible car ce compte n'a encore rien commencé sur le réseau.",vote_confirm_recreate:"L'application va mettre de côté les fichiers du compte inutilisable et créer un nouveau compte d'opérateur avec une nouvelle adresse. Envoyez-nous ensuite la nouvelle adresse pour approbation. Continuer ?",e_not_allowed:"Cette action n'est pas disponible pour le moment."});
+Object.assign(I18N.es, {vs_stuck:"Un paso de la votación ha fallado varias veces seguidas. La aplicación sigue intentándolo con intervalos más largos. Si continúa, envía un informe de problema.",vs_account_broken:"La cuenta de operador de este equipo no se puede usar: está incompleta, o se creó con otra cuenta de Windows o en otro equipo. La votación no puede continuar con ella.",vs_rpc_not_ours:"Otro programa responde en el puerto local del nodo, así que la aplicación detuvo los pasos de la votación por tu seguridad. Reinicia el equipo y vuelve a abrir MADAR.",vote_recreate_btn:"Volver a crear la cuenta de operador",vote_recreate_hint:"Es posible porque la cuenta aún no ha iniciado nada en la red.",vote_confirm_recreate:"La aplicación apartará los archivos de la cuenta inutilizable y creará una nueva cuenta de operador con una nueva dirección. Después envíanos la nueva dirección para su aprobación. ¿Continuar?",e_not_allowed:"Esta acción no está disponible ahora."});
+Object.assign(I18N.tr, {vs_stuck:"Bir oylama adımı art arda birkaç kez başarısız oldu. Uygulama daha uzun aralıklarla denemeye devam ediyor. Bu sürerse bir sorun raporu gönderin.",vs_account_broken:"Bu bilgisayardaki operatör hesabı kullanılamıyor: eksik ya da başka bir Windows hesabıyla veya başka bir bilgisayarda oluşturulmuş. Oylama bu hesapla devam edemez.",vs_rpc_not_ours:"Düğümün yerel bağlantı noktasında başka bir program yanıt veriyor; bu nedenle uygulama güvenliğiniz için oylama adımlarını durdurdu. Bilgisayarı yeniden başlatın, ardından MADAR'ı yeniden açın.",vote_recreate_btn:"Operatör hesabını yeniden oluştur",vote_recreate_hint:"Hesap ağda henüz hiçbir şey başlatmadığı için bu mümkün.",vote_confirm_recreate:"Uygulama kullanılamayan hesabın dosyalarını bir kenara ayıracak ve yeni adresli yeni bir operatör hesabı oluşturacak. Ardından yeni adresi onay için bize gönderin. Devam edilsin mi?",e_not_allowed:"Bu işlem şu anda kullanılamıyor."});
+Object.assign(I18N.id, {vs_stuck:"Salah satu langkah pemungutan suara gagal beberapa kali berturut-turut. Aplikasi terus mencoba dengan jeda yang lebih panjang. Jika berlanjut, kirim laporan masalah.",vs_account_broken:"Akun operator di komputer ini tidak dapat digunakan: tidak lengkap, atau dibuat dengan akun Windows lain atau di komputer lain. Pemungutan suara tidak dapat dilanjutkan dengan akun ini.",vs_rpc_not_ours:"Program lain menjawab di port lokal node, jadi aplikasi menghentikan langkah pemungutan suara demi keamanan Anda. Mulai ulang komputer, lalu buka MADAR lagi.",vote_recreate_btn:"Buat ulang akun operator",vote_recreate_hint:"Ini dimungkinkan karena akun belum memulai apa pun di jaringan.",vote_confirm_recreate:"Aplikasi akan menyisihkan file akun yang tidak dapat digunakan dan membuat akun operator baru dengan alamat baru. Lalu kirim alamat baru kepada kami untuk disetujui. Lanjutkan?",e_not_allowed:"Tindakan ini tidak tersedia sekarang."});
+// round 3 (2026-10-17): no unsafe RPC, machine binding, lost state, encrypted backup and restore
+Object.assign(I18N.en, {vs_state_lost:"The saved voting state on this computer was lost. Choose whether voting should continue on this computer; until then the app takes no voting step.",vs_cannot_verify:"The app cannot confirm that the voting keys on this computer belong to it (the protected marker cannot be read here). The node keeps running as a full node and nothing was changed. If this computer should vote, register new voting keys for it.",vs_rpc_not_ours:"Another program keeps answering on the node's local ports, so the app stopped the voting steps for your safety. Restart the computer, then open MADAR again.",vote_rekey_btn:"Register new voting keys for this computer",vote_rekey_hint:"The old key files are only renamed and kept; nothing is deleted.",vote_confirm_rekey:"The app will register new voting keys for this computer (old key files are renamed and kept, not deleted). If another computer votes with this account, stop voting there first: the network keeps using the old keys until the next session change, and two computers must never vote for one account. Continue?",vote_backup_title:"Save an encrypted backup",vote_backup_hint:"Protects the operator account with a password you choose, so you can restore it on another computer. Without this password the file cannot be opened, and nobody can recover it for you.",vote_backup_pass:"Backup password (at least 12 characters)",vote_backup_pass2:"Repeat the password",vote_backup_save:"Save the backup file",vote_backup_done:"The encrypted backup file was saved. Keep it and its password in two separate places.",vote_restore_title:"Restore the account",vote_restore_hint:"Restore an operator account from an encrypted backup file. The app then registers new voting keys for this computer.",vote_restore_file:"Backup file",vote_restore_pass:"Backup password",vote_restore_btn:"Restore the account",vote_confirm_restore:"Restore the operator account from this file on this computer and enable voting here? If another computer votes with this account, stop voting there first: two computers must never vote for one account.",vote_restore_done:"The account was restored. The app continues the voting steps by itself.",ve_keys_mismatch:"The voting keys registered on the network are not in this computer's key files.",vs_keys_other_device:"The voting keys registered on the network for this account were not registered by this computer: another computer seems to vote with this account. This node stays a full node. If this computer should vote instead, stop voting on the other computer, then register new voting keys for this one.",vote_clone_warn:"Never run a copy of this voting computer (a virtual machine or a disk clone) or a second copy of the app with the same data at the same time as this one: two copies signing with the same keys is double signing, which the network punishes.",ve_job_failed:"Windows did not let the app tie the node to itself, so the node will not vote in this session. Restart the computer, then open MADAR again.",e_password_short:"The password must be at least 12 characters.",e_password_bad:"The password must not contain line breaks and must be at most 256 characters.",e_password_mismatch:"The two passwords do not match.",e_backup_failed:"The backup could not be made. Try again.",e_restore_failed:"The account could not be restored. Check the file and its password.",e_not_a_backup:"This is not a MADAR operator account backup file.",e_account_exists:"An operator account already exists on this computer.",e_no_operator_account:"There is no operator account on this computer yet.",e_unseal_failed:"The operator account cannot be opened under this Windows account.",e_no_file:"Choose the backup file first."});
+Object.assign(I18N.fr, {vs_state_lost:"L'état de vote enregistré sur cet ordinateur a été perdu. Choisissez si le vote doit continuer sur cet ordinateur ; d'ici là, l'application n'effectue aucune étape du vote.",vs_cannot_verify:"L'application ne peut pas confirmer que les clés de vote de cet ordinateur lui appartiennent (le marqueur protégé ne peut pas être lu ici). Le nœud continue comme nœud complet et rien n'a été modifié. Si cet ordinateur doit voter, enregistrez-lui de nouvelles clés de vote.",vs_rpc_not_ours:"Un autre programme continue de répondre sur les ports locaux du nœud ; l'application a donc arrêté les étapes du vote pour votre sécurité. Redémarrez l'ordinateur, puis rouvrez MADAR.",vote_rekey_btn:"Enregistrer de nouvelles clés de vote pour cet ordinateur",vote_rekey_hint:"Les anciens fichiers de clés sont seulement renommés et conservés ; rien n'est supprimé.",vote_confirm_rekey:"L'application va enregistrer de nouvelles clés de vote pour cet ordinateur (les anciens fichiers de clés sont renommés et conservés, non supprimés). Si un autre ordinateur vote avec ce compte, arrêtez d'abord le vote sur celui-ci : le réseau continue d'utiliser les anciennes clés jusqu'au prochain changement de session, et deux ordinateurs ne doivent jamais voter pour un même compte. Continuer ?",vote_backup_title:"Enregistrer une sauvegarde chiffrée",vote_backup_hint:"Protège le compte d'opérateur par un mot de passe que vous choisissez, pour pouvoir le restaurer sur un autre ordinateur. Sans ce mot de passe, le fichier ne peut pas être ouvert et personne ne peut le récupérer pour vous.",vote_backup_pass:"Mot de passe de la sauvegarde (12 caractères au moins)",vote_backup_pass2:"Répétez le mot de passe",vote_backup_save:"Enregistrer le fichier de sauvegarde",vote_backup_done:"Le fichier de sauvegarde chiffré a été enregistré. Conservez-le, ainsi que son mot de passe, à deux endroits distincts.",vote_restore_title:"Restaurer le compte",vote_restore_hint:"Restaurez un compte d'opérateur à partir d'un fichier de sauvegarde chiffré. L'application enregistre ensuite de nouvelles clés de vote pour cet ordinateur.",vote_restore_file:"Fichier de sauvegarde",vote_restore_pass:"Mot de passe de la sauvegarde",vote_restore_btn:"Restaurer le compte",vote_confirm_restore:"Restaurer le compte d'opérateur à partir de ce fichier sur cet ordinateur et y activer le vote ? Si un autre ordinateur vote avec ce compte, arrêtez d'abord le vote sur celui-ci : deux ordinateurs ne doivent jamais voter pour un même compte.",vote_restore_done:"Le compte a été restauré. L'application poursuit d'elle-même les étapes du vote.",ve_keys_mismatch:"Les clés de vote enregistrées sur le réseau ne figurent pas dans les fichiers de clés de cet ordinateur.",vs_keys_other_device:"Les clés de vote enregistrées sur le réseau pour ce compte n'ont pas été enregistrées par cet ordinateur : un autre ordinateur semble voter avec ce compte. Ce nœud reste un nœud complet. Si c'est cet ordinateur qui doit voter, arrêtez le vote sur l'autre ordinateur, puis enregistrez de nouvelles clés de vote pour celui-ci.",vote_clone_warn:"Ne faites jamais tourner une copie de cet ordinateur votant (machine virtuelle ou clone de disque) ni une deuxième copie de l'application avec les mêmes données en même temps que celui-ci : deux copies qui signent avec les mêmes clés constituent une double signature, que le réseau sanctionne.",ve_job_failed:"Windows n'a pas permis à l'application de rattacher le nœud à elle-même ; le nœud ne votera donc pas pendant cette session. Redémarrez l'ordinateur, puis rouvrez MADAR.",e_password_short:"Le mot de passe doit comporter au moins 12 caractères.",e_password_bad:"Le mot de passe ne doit pas contenir de saut de ligne et ne doit pas dépasser 256 caractères.",e_password_mismatch:"Les deux mots de passe ne correspondent pas.",e_backup_failed:"La sauvegarde n'a pas pu être créée. Réessayez.",e_restore_failed:"Le compte n'a pas pu être restauré. Vérifiez le fichier et son mot de passe.",e_not_a_backup:"Ce fichier n'est pas une sauvegarde de compte d'opérateur MADAR.",e_account_exists:"Un compte d'opérateur existe déjà sur cet ordinateur.",e_no_operator_account:"Il n'y a pas encore de compte d'opérateur sur cet ordinateur.",e_unseal_failed:"Le compte d'opérateur ne peut pas être ouvert avec ce compte Windows.",e_no_file:"Choisissez d'abord le fichier de sauvegarde."});
+Object.assign(I18N.es, {vs_state_lost:"Se perdió el estado de votación guardado en este equipo. Elige si la votación debe continuar en este equipo; hasta entonces la aplicación no realiza ningún paso de votación.",vs_cannot_verify:"La aplicación no puede confirmar que las claves de votación de este equipo le pertenecen (la marca protegida no se puede leer aquí). El nodo sigue como nodo completo y no se cambió nada. Si este equipo debe votar, registra nuevas claves de votación para él.",vs_rpc_not_ours:"Otro programa sigue respondiendo en los puertos locales del nodo, así que la aplicación detuvo los pasos de la votación por tu seguridad. Reinicia el equipo y vuelve a abrir MADAR.",vote_rekey_btn:"Registrar nuevas claves de votación para este equipo",vote_rekey_hint:"Los archivos de claves anteriores solo se renombran y se conservan; no se borra nada.",vote_confirm_rekey:"La aplicación registrará nuevas claves de votación para este equipo (los archivos de claves anteriores se renombran y se conservan, no se borran). Si otro equipo vota con esta cuenta, detén primero la votación allí: la red sigue usando las claves anteriores hasta el próximo cambio de sesión, y dos equipos nunca deben votar por una misma cuenta. ¿Continuar?",vote_backup_title:"Guardar una copia de seguridad cifrada",vote_backup_hint:"Protege la cuenta de operador con una contraseña que tú eliges, para poder restaurarla en otro equipo. Sin esta contraseña el archivo no se puede abrir y nadie puede recuperarla por ti.",vote_backup_pass:"Contraseña de la copia (al menos 12 caracteres)",vote_backup_pass2:"Repite la contraseña",vote_backup_save:"Guardar el archivo de copia",vote_backup_done:"Se guardó el archivo de copia de seguridad cifrado. Guárdalo junto con su contraseña en dos lugares distintos.",vote_restore_title:"Restaurar la cuenta",vote_restore_hint:"Restaura una cuenta de operador desde un archivo de copia de seguridad cifrado. Luego la aplicación registra nuevas claves de votación para este equipo.",vote_restore_file:"Archivo de copia de seguridad",vote_restore_pass:"Contraseña de la copia",vote_restore_btn:"Restaurar la cuenta",vote_confirm_restore:"¿Restaurar la cuenta de operador desde este archivo en este equipo y activar aquí la votación? Si otro equipo vota con esta cuenta, detén primero la votación allí: dos equipos nunca deben votar por una misma cuenta.",vote_restore_done:"La cuenta se restauró. La aplicación continúa sola con los pasos de la votación.",ve_keys_mismatch:"Las claves de votación registradas en la red no están en los archivos de claves de este equipo.",vs_keys_other_device:"Las claves de votación registradas en la red para esta cuenta no las registró este equipo: parece que otro equipo vota con esta cuenta. Este nodo sigue como nodo completo. Si debe votar este equipo, detén la votación en el otro equipo y luego registra nuevas claves de votación para este.",vote_clone_warn:"Nunca ejecutes una copia de este equipo votante (una máquina virtual o un clon del disco) ni una segunda copia de la aplicación con los mismos datos al mismo tiempo que este: dos copias que firman con las mismas claves son una doble firma, que la red castiga.",ve_job_failed:"Windows no permitió que la aplicación vinculara el nodo a sí misma, así que el nodo no votará en esta sesión. Reinicia el equipo y vuelve a abrir MADAR.",e_password_short:"La contraseña debe tener al menos 12 caracteres.",e_password_bad:"La contraseña no debe contener saltos de línea ni superar los 256 caracteres.",e_password_mismatch:"Las dos contraseñas no coinciden.",e_backup_failed:"No se pudo crear la copia de seguridad. Inténtalo de nuevo.",e_restore_failed:"No se pudo restaurar la cuenta. Comprueba el archivo y su contraseña.",e_not_a_backup:"Este archivo no es una copia de seguridad de una cuenta de operador de MADAR.",e_account_exists:"Ya existe una cuenta de operador en este equipo.",e_no_operator_account:"Todavía no hay una cuenta de operador en este equipo.",e_unseal_failed:"La cuenta de operador no se puede abrir con esta cuenta de Windows.",e_no_file:"Elige primero el archivo de copia de seguridad."});
+Object.assign(I18N.tr, {vs_state_lost:"Bu bilgisayarda kayıtlı oylama durumu kayboldu. Oylamanın bu bilgisayarda devam edip etmeyeceğini seçin; o zamana kadar uygulama hiçbir oylama adımı atmaz.",vs_cannot_verify:"Uygulama, bu bilgisayardaki oylama anahtarlarının kendisine ait olduğunu doğrulayamıyor (korumalı işaret burada okunamıyor). Düğüm tam düğüm olarak çalışmaya devam ediyor ve hiçbir şey değiştirilmedi. Bu bilgisayar oy verecekse, ona yeni oylama anahtarları kaydedin.",vs_rpc_not_ours:"Düğümün yerel bağlantı noktalarında başka bir program yanıt vermeyi sürdürüyor; bu nedenle uygulama güvenliğiniz için oylama adımlarını durdurdu. Bilgisayarı yeniden başlatın, ardından MADAR'ı yeniden açın.",vote_rekey_btn:"Bu bilgisayar için yeni oylama anahtarları kaydet",vote_rekey_hint:"Eski anahtar dosyaları yalnızca yeniden adlandırılır ve saklanır; hiçbir şey silinmez.",vote_confirm_rekey:"Uygulama bu bilgisayar için yeni oylama anahtarları kaydedecek (eski anahtar dosyaları silinmez, yeniden adlandırılıp saklanır). Bu hesapla başka bir bilgisayar oy veriyorsa önce oradaki oylamayı durdurun: ağ bir sonraki oturum değişikliğine kadar eski anahtarları kullanmaya devam eder ve bir hesap için asla iki bilgisayar oy vermemelidir. Devam edilsin mi?",vote_backup_title:"Şifreli yedek kaydet",vote_backup_hint:"Operatör hesabını seçtiğiniz bir parolayla korur; böylece hesabı başka bir bilgisayarda geri yükleyebilirsiniz. Bu parola olmadan dosya açılamaz ve kimse onu sizin için kurtaramaz.",vote_backup_pass:"Yedek parolası (en az 12 karakter)",vote_backup_pass2:"Parolayı yeniden yazın",vote_backup_save:"Yedek dosyasını kaydet",vote_backup_done:"Şifreli yedek dosyası kaydedildi. Dosyayı ve parolasını iki ayrı yerde saklayın.",vote_restore_title:"Hesabı geri yükle",vote_restore_hint:"Bir operatör hesabını şifreli yedek dosyasından geri yükleyin. Ardından uygulama bu bilgisayar için yeni oylama anahtarları kaydeder.",vote_restore_file:"Yedek dosyası",vote_restore_pass:"Yedek parolası",vote_restore_btn:"Hesabı geri yükle",vote_confirm_restore:"Operatör hesabı bu dosyadan bu bilgisayara geri yüklensin ve oylama burada etkinleştirilsin mi? Bu hesapla başka bir bilgisayar oy veriyorsa önce oradaki oylamayı durdurun: bir hesap için asla iki bilgisayar oy vermemelidir.",vote_restore_done:"Hesap geri yüklendi. Uygulama oylama adımlarına kendisi devam ediyor.",ve_keys_mismatch:"Ağda kayıtlı oylama anahtarları bu bilgisayarın anahtar dosyalarında yok.",vs_keys_other_device:"Bu hesap için ağda kayıtlı oylama anahtarlarını bu bilgisayar kaydetmedi: bu hesapla başka bir bilgisayar oy veriyor gibi görünüyor. Bu düğüm tam düğüm olarak kalır. Oy verecek olan bu bilgisayarsa önce diğer bilgisayardaki oylamayı durdurun, ardından bu bilgisayar için yeni oylama anahtarları kaydedin.",vote_clone_warn:"Bu oy veren bilgisayarın bir kopyasını (sanal makine veya disk klonu) ya da aynı verilerle uygulamanın ikinci bir kopyasını asla bununla aynı anda çalıştırmayın: aynı anahtarlarla imzalayan iki kopya çift imzadır ve ağ bunu cezalandırır.",ve_job_failed:"Windows, uygulamanın düğümü kendisine bağlamasına izin vermedi; bu nedenle düğüm bu oturumda oy vermeyecek. Bilgisayarı yeniden başlatın, ardından MADAR'ı yeniden açın.",e_password_short:"Parola en az 12 karakter olmalıdır.",e_password_bad:"Parola satır sonu içermemeli ve 256 karakteri geçmemelidir.",e_password_mismatch:"İki parola eşleşmiyor.",e_backup_failed:"Yedek oluşturulamadı. Yeniden deneyin.",e_restore_failed:"Hesap geri yüklenemedi. Dosyayı ve parolasını kontrol edin.",e_not_a_backup:"Bu dosya bir MADAR operatör hesabı yedeği değil.",e_account_exists:"Bu bilgisayarda zaten bir operatör hesabı var.",e_no_operator_account:"Bu bilgisayarda henüz bir operatör hesabı yok.",e_unseal_failed:"Operatör hesabı bu Windows hesabıyla açılamıyor.",e_no_file:"Önce yedek dosyasını seçin."});
+Object.assign(I18N.id, {vs_state_lost:"Status pemungutan suara yang tersimpan di komputer ini hilang. Pilih apakah pemungutan suara akan dilanjutkan di komputer ini; sampai saat itu aplikasi tidak menjalankan langkah pemungutan suara apa pun.",vs_cannot_verify:"Aplikasi tidak dapat memastikan bahwa kunci pemungutan suara di komputer ini miliknya (penanda yang dilindungi tidak dapat dibaca di sini). Node tetap berjalan sebagai node penuh dan tidak ada yang diubah. Jika komputer ini yang harus memberi suara, daftarkan kunci pemungutan suara baru untuknya.",vs_rpc_not_ours:"Program lain terus menjawab di port lokal node, jadi aplikasi menghentikan langkah pemungutan suara demi keamanan Anda. Mulai ulang komputer, lalu buka MADAR lagi.",vote_rekey_btn:"Daftarkan kunci pemungutan suara baru untuk komputer ini",vote_rekey_hint:"File kunci lama hanya diganti namanya dan tetap disimpan; tidak ada yang dihapus.",vote_confirm_rekey:"Aplikasi akan mendaftarkan kunci pemungutan suara baru untuk komputer ini (file kunci lama diganti namanya dan tetap disimpan, tidak dihapus). Jika komputer lain memberi suara dengan akun ini, hentikan pemungutan suara di sana terlebih dahulu: jaringan tetap memakai kunci lama hingga pergantian sesi berikutnya, dan dua komputer tidak boleh memberi suara untuk satu akun. Lanjutkan?",vote_backup_title:"Simpan cadangan terenkripsi",vote_backup_hint:"Melindungi akun operator dengan kata sandi pilihan Anda, agar dapat dipulihkan di komputer lain. Tanpa kata sandi ini file tidak dapat dibuka, dan tidak ada yang dapat memulihkannya untuk Anda.",vote_backup_pass:"Kata sandi cadangan (minimal 12 karakter)",vote_backup_pass2:"Ulangi kata sandi",vote_backup_save:"Simpan file cadangan",vote_backup_done:"File cadangan terenkripsi telah disimpan. Simpan file dan kata sandinya di dua tempat terpisah.",vote_restore_title:"Pulihkan akun",vote_restore_hint:"Pulihkan akun operator dari file cadangan terenkripsi. Setelah itu aplikasi mendaftarkan kunci pemungutan suara baru untuk komputer ini.",vote_restore_file:"File cadangan",vote_restore_pass:"Kata sandi cadangan",vote_restore_btn:"Pulihkan akun",vote_confirm_restore:"Pulihkan akun operator dari file ini di komputer ini dan aktifkan pemungutan suara di sini? Jika komputer lain memberi suara dengan akun ini, hentikan pemungutan suara di sana terlebih dahulu: dua komputer tidak boleh memberi suara untuk satu akun.",vote_restore_done:"Akun telah dipulihkan. Aplikasi melanjutkan langkah pemungutan suara sendiri.",ve_keys_mismatch:"Kunci pemungutan suara yang terdaftar di jaringan tidak ada di file kunci komputer ini.",vs_keys_other_device:"Kunci pemungutan suara yang terdaftar di jaringan untuk akun ini tidak didaftarkan oleh komputer ini: tampaknya komputer lain memberi suara dengan akun ini. Node ini tetap menjadi node penuh. Jika komputer ini yang harus memberi suara, hentikan pemungutan suara di komputer lain, lalu daftarkan kunci pemungutan suara baru untuk komputer ini.",vote_clone_warn:"Jangan pernah menjalankan salinan komputer pemberi suara ini (mesin virtual atau klon disk) atau salinan kedua aplikasi dengan data yang sama bersamaan dengan komputer ini: dua salinan yang menandatangani dengan kunci yang sama adalah tanda tangan ganda, yang dihukum oleh jaringan.",ve_job_failed:"Windows tidak mengizinkan aplikasi mengikat node ke dirinya, jadi node tidak akan memberi suara pada sesi ini. Mulai ulang komputer, lalu buka MADAR lagi.",e_password_short:"Kata sandi minimal 12 karakter.",e_password_bad:"Kata sandi tidak boleh berisi baris baru dan maksimal 256 karakter.",e_password_mismatch:"Kedua kata sandi tidak sama.",e_backup_failed:"Cadangan tidak dapat dibuat. Coba lagi.",e_restore_failed:"Akun tidak dapat dipulihkan. Periksa file dan kata sandinya.",e_not_a_backup:"File ini bukan cadangan akun operator MADAR.",e_account_exists:"Sudah ada akun operator di komputer ini.",e_no_operator_account:"Belum ada akun operator di komputer ini.",e_unseal_failed:"Akun operator tidak dapat dibuka dengan akun Windows ini.",e_no_file:"Pilih file cadangan terlebih dahulu."});
 let LANG = "en", stopped = false, updating = false, built = false, lastStatus = null;
 
 const t = (k, v) => ((I18N[LANG] && I18N[LANG][k]) || I18N.en[k] || k).replace("{v}", v ?? "");
+// unknown error codes fall back to the general message (never a raw code on screen)
+const ek = c => I18N.en["e_" + c] ? "e_" + c : "e_generic", te = c => t(ek(c));
 const nf = n => n == null ? "—" : new Intl.NumberFormat(LANG).format(n);
 
 function applyLang(lang) {
@@ -407,7 +480,7 @@ async function post(path, body) {
 $("lang").addEventListener("change", async e => { applyLang(e.target.value); try { await post("/api/settings", {lang: LANG}); } catch (_) {} });
 $("autostart").addEventListener("change", async e => {
   const {ok, j} = await post("/api/settings", {autostart: e.target.checked});
-  if (!ok) { e.target.checked = !e.target.checked; alert(t("e_" + (j.error || "generic"))); }
+  if (!ok) { e.target.checked = !e.target.checked; alert(te(j.error)); }
 });
 
 function validate() {
@@ -420,7 +493,7 @@ $("acc-btn").addEventListener("click", async () => {
   if (!confirm(t("confirm_save"))) return;
   $("acc-btn").disabled = true; $("acc-err").textContent = "";
   const {ok, j} = await post("/api/account", {name: $("name").value, email: $("email").value});
-  if (!ok) { $("acc-err").textContent = t("e_" + (j.error || "generic")); validate(); return; }
+  if (!ok) { $("acc-err").textContent = te(j.error); validate(); return; }
   refresh();
 });
 $("stop-btn").addEventListener("click", async () => {
@@ -432,7 +505,7 @@ $("stop-btn").addEventListener("click", async () => {
 $("upd-btn").addEventListener("click", async () => {
   $("upd-btn").disabled = true;
   const {ok, j} = await post("/api/update");
-  if (!ok) { $("upd-text").textContent = t("e_" + (j.error || "generic")); $("upd-btn").disabled = false; }
+  if (!ok) { $("upd-text").textContent = te(j.error); $("upd-btn").disabled = false; }
 });
 
 // "My earnings"
@@ -474,12 +547,107 @@ $("earn-link").addEventListener("click", async () => {
   earnBusy = true; $("earn-link").disabled = true; $("earn-err").textContent = "";
   const {ok, j} = await post("/api/rewards/link");
   earnBusy = false;
-  if (!ok) { $("earn-err").textContent = t("e_" + (j.error || "service")); $("earn-link").disabled = false; return; }
+  if (!ok) { $("earn-err").textContent = te(j.error || "service"); $("earn-link").disabled = false; return; }
   $("earn-url").textContent = j.link || ""; $("earn-wait").hidden = false;
 });
 
 // opens the campaign page (a fixed address) in the user's own browser, where Madar Wallet is
 $("earn-camp-btn").addEventListener("click", async () => { try { await post("/api/rewards/campaign"); } catch (_) {} });
+
+// "Enable voting": the page only shows the stage and the public address; the app runs every step
+function renderVote(s) {
+  const v = s.vote || {}, st = v.stage || "off", wanted = !!v.wanted;
+  $("vote-card").hidden = false;
+  const showStage = st !== "off";
+  $("vote-stage").hidden = !showStage;
+  if (showStage) $("vote-stage").textContent = t("vs_" + st);
+  $("vote-intro").hidden = wanted;
+  $("vote-addr-box").hidden = !v.address;
+  if ($("vote-addr").textContent !== (v.address || "")) $("vote-addr").textContent = v.address || "";
+  $("vote-send").hidden = !(wanted && v.address && (st === "awaiting_approval" || st === "needs_newer_node"));
+  const showExp = (st === "voting" || st === "renewing") && v.expiry_session != null;
+  $("vote-expiry").hidden = !showExp;
+  if (showExp) $("vote-expiry").textContent = t("vote_expiry", nf(v.expiry_session));
+  // a specific message for some errors (ve_<code>), else the general one
+  const ek = v.error ? "ve_" + v.error : "";
+  $("vote-err").textContent = v.error && !voteBusy ? t(I18N.en[ek] ? ek : "vote_err") : "";
+  // the saved state was lost: the user chooses again (both buttons), the app takes no step until then
+  const lost = st === "state_lost";
+  $("vote-on").hidden = wanted && !lost; $("vote-off").hidden = !wanted && !lost;
+  // "Recreate the operator account": only for an unusable account that has not started anything on the network (the app checks again)
+  const canRecreate = wanted && st === "account_broken" && v.can_recreate === true;
+  $("vote-recreate").hidden = !canRecreate; $("vote-recreate-hint").hidden = !canRecreate;
+  // "Register new keys for this computer": only when the app cannot verify the keys here (old files are renamed, never deleted)
+  // also when the network names keys this computer never registered (another computer votes): the user may take over
+  const canRekey = st === "cannot_verify" || st === "keys_other_device";
+  $("vote-rekey").hidden = !canRekey; $("vote-rekey-hint").hidden = !canRekey;
+  // backup: an account exists and opens; restore: no operator account file at all on this computer
+  $("vote-backup").hidden = !(v.address && st !== "account_broken");
+  $("vote-restore").hidden = !(s.account && v.has_account_files === false);
+  $("role-chip").textContent = t(v.mode === "validator" ? "role_voting" : "role");
+}
+let voteBusy = false;
+async function voteSet(path, ask) {
+  if (voteBusy || !confirm(t(ask))) return;
+  voteBusy = true;
+  try {
+    const {ok, j} = await post(path);
+    if (!ok) $("vote-err").textContent = te(j.error);
+  } catch (_) {}
+  voteBusy = false; refresh();
+}
+$("vote-on").addEventListener("click", () => voteSet("/api/vote/enable", "vote_confirm_on"));
+$("vote-off").addEventListener("click", () => voteSet("/api/vote/disable", "vote_confirm_off"));
+$("vote-recreate").addEventListener("click", () => voteSet("/api/vote/recreate", "vote_confirm_recreate"));
+$("vote-rekey").addEventListener("click", () => voteSet("/api/vote/rekey", "vote_confirm_rekey"));
+// "Save an encrypted backup": the app returns the encrypted file only (no secret in clear); the browser saves it where the user chooses
+$("vote-bk-save").addEventListener("click", async () => {
+  const a = $("vote-bk-pass").value, b = $("vote-bk-pass2").value, err = k => $("vote-bk-err").textContent = t(k);
+  // the passwords never stay in the page after any result
+  $("vote-bk-pass").value = ""; $("vote-bk-pass2").value = "";
+  $("vote-bk-err").textContent = ""; $("vote-bk-done").hidden = true;
+  if ([...a].length < 12) return err("e_password_short");
+  if (a !== b) return err("e_password_mismatch");
+  $("vote-bk-save").disabled = true;
+  try {
+    const {ok, j} = await post("/api/vote/backup", {password: a, confirm: b});
+    if (!ok) err(ek(j.error || "backup_failed"));
+    else {
+      const url = URL.createObjectURL(new Blob([j.file], {type: "application/json"}));
+      const el = document.createElement("a");
+      el.href = url; el.download = j.name || "madar-operator-backup.json";
+      document.body.appendChild(el); el.click(); el.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      $("vote-bk-done").hidden = false;
+    }
+  } catch (_) { err("e_backup_failed"); }
+  $("vote-bk-save").disabled = false;
+});
+// "Restore the account": on a computer without an operator account; new voting keys are then registered for this computer
+$("vote-rs-btn").addEventListener("click", async () => {
+  const f = $("vote-rs-file").files[0], pw = $("vote-rs-pass").value, err = k => $("vote-rs-err").textContent = t(k);
+  // the password never stays in the page after any result
+  $("vote-rs-pass").value = "";
+  $("vote-rs-err").textContent = "";
+  if (!f) return err("e_no_file");
+  if (f.size > 65536) return err("e_not_a_backup");
+  if ([...pw].length < 12) return err("e_password_short");
+  if (!confirm(t("vote_confirm_restore"))) return;
+  voteBusy = true; $("vote-rs-btn").disabled = true;
+  try {
+    const {ok, j} = await post("/api/vote/restore", {file: await f.text(), password: pw});
+    if (!ok) err(ek(j.error || "restore_failed"));
+    else { $("vote-rs-file").value = ""; alert(t("vote_restore_done")); }
+  } catch (_) { err("e_restore_failed"); }
+  voteBusy = false; $("vote-rs-btn").disabled = false; refresh();
+});
+$("vote-copy").addEventListener("click", async () => {
+  const text = $("vote-addr").textContent;
+  try { await navigator.clipboard.writeText(text); }
+  catch (_) { const r = document.createRange(); r.selectNodeContents($("vote-addr")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); try { document.execCommand("copy"); } catch (_) {} }
+  $("vote-copy").textContent = t("vote_copied");
+  setTimeout(() => $("vote-copy").textContent = t("vote_copy"), 2000);
+});
 
 function showOff(title, hint) {
   ["hero-card", "acc-form", "acc-view", "settings", "earn-card"].forEach(s => $(s).hidden = true);
@@ -547,24 +715,24 @@ function renderCharts(hist) {
 
 $("help-net").addEventListener("change", async e => {
   const {ok, j} = await post("/api/settings", {help_network: e.target.checked});
-  if (!ok) { e.target.checked = !e.target.checked; alert(t("e_" + (j.error || "generic"))); }
+  if (!ok) { e.target.checked = !e.target.checked; alert(te(j.error)); }
 });
 $("report-btn").addEventListener("click", async () => {
   $("report-btn").disabled = true;
   const {ok, j} = await post("/api/report", {});
   $("report-btn").disabled = false;
-  alert(ok ? t("report_done", j.file) : t("e_" + (j.error || "generic")));
+  alert(ok ? t("report_done", j.file) : te(j.error));
 });
 $("saver").addEventListener("change", async e => {
   const {ok, j} = await post("/api/settings", {saver: e.target.checked});
-  if (!ok) { e.target.checked = !e.target.checked; alert(t("e_" + (j.error || "generic"))); }
+  if (!ok) { e.target.checked = !e.target.checked; alert(te(j.error)); }
 });
 $("repair-btn").addEventListener("click", async () => {
   if (!confirm(t("confirm_repair"))) return;
   $("repair-btn").disabled = true;
   const {ok, j} = await post("/api/repair", {});
   $("repair-btn").disabled = false;
-  if (!ok) alert(t("e_" + (j.error || "generic")));
+  if (!ok) alert(te(j.error));
   refresh();
 });
 
@@ -626,7 +794,7 @@ function renderUpdate(u) {
   updating = !!progress;
   $("upd-btn").hidden = !!progress;
   const notes = u.notes && (u.notes[LANG] || u.notes.en);
-  $("upd-text").textContent = progress ? t(progress) : (u.progress === "failed" && u.error) ? t("e_" + u.error) : (notes ? notes + " — " : "") + t("upd_required");
+  $("upd-text").textContent = progress ? t(progress) : (u.progress === "failed" && u.error) ? te(u.error) : (notes ? notes + " — " : "") + t("upd_required");
   if (u.progress === "failed") $("upd-btn").disabled = false;
 }
 
@@ -636,7 +804,7 @@ function render(s) {
   $("foot").textContent = `${t("version")} ${s.version}` + (s.update && s.update.error && !s.update.available ? ` · ${t("check_failed")}` : "");
   $("off").hidden = true;
   if (!s.account) {
-    ["hero-card", "acc-view", "settings", "chart-card", "repair-card", "earn-card"].forEach(id => $(id).hidden = true);
+    ["hero-card", "acc-view", "settings", "chart-card", "repair-card", "earn-card", "vote-card"].forEach(id => $(id).hidden = true);
     const onboarded = s.settings && s.settings.onboarded;
     $("welcome").hidden = !!onboarded; $("acc-form").hidden = !onboarded;
     if (!onboarded) renderWelcome();
@@ -645,6 +813,7 @@ function render(s) {
   $("welcome").hidden = true; $("acc-form").hidden = true;
   $("hero-card").hidden = false; $("acc-view").hidden = false; $("settings").hidden = false; $("chart-card").hidden = false;
   renderEarn(); // shown only when "My earnings" is open on the service, or the node is already linked
+  renderVote(s);
   $("repair-card").hidden = s.state !== "needs_repair";
   renderCharts(s.history || []);
   $("saver").checked = !!(s.settings && s.settings.saver);

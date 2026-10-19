@@ -59,25 +59,41 @@ impl Account {
     /// Creates a new account and writes it encrypted. Returns only the public ID.
     pub fn create(enc_path: &Path, passphrase: &str) -> Result<AccountId, String> {
         check_passphrase(passphrase)?;
-        let (pair, phrase, _seed) = sr25519::Pair::generate_with_phrase(None);
+        let (_pair, phrase, _seed) = sr25519::Pair::generate_with_phrase(None);
         let phrase = Zeroizing::new(phrase);
-        let id = AccountId::from(pair.public().0);
-        let backup = madar_keystore::backup_secret(phrase.as_bytes(), passphrase)
-            .map_err(|e| format!("Failed to encrypt the account: {e:?}"))?;
-        let public = format!(
-            "account_id_hex={}\nss58={}\n",
-            hex::encode(id.as_ref() as &[u8]),
-            id.to_ss58check()
-        );
-        madar_keystore::create_key_files(
-            enc_path,
-            &backup.to_bytes(),
-            &pub_path(enc_path),
-            public.as_bytes(),
-            passphrase,
-            phrase.as_bytes(),
-        )?;
-        Ok(id)
+        write_files(enc_path, phrase.as_bytes(), passphrase)
+    }
+
+    /// Writes an **existing** account (its phrase from an encrypted backup, `join import`) with a new passphrase. Never replaces an existing file.
+    pub fn import_phrase(
+        enc_path: &Path,
+        phrase: &[u8],
+        passphrase: &str,
+    ) -> Result<AccountId, String> {
+        check_passphrase(passphrase)?;
+        write_files(enc_path, phrase, passphrase)
+    }
+
+    /// The recovery phrase from a `.enc` file, only for the encrypted backup (`join export`); never printed or written in plain form.
+    pub fn phrase_of(enc_path: &Path, passphrase: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+        let bytes = std::fs::read(enc_path)
+            .map_err(|e| format!("Could not read {}: {e}", enc_path.display()))?;
+        let backup = madar_keystore::EncryptedBackup::from_bytes(&bytes).map_err(|_| {
+            "The account file is corrupt or not in madar-keystore format".to_string()
+        })?;
+        let phrase = madar_keystore::restore_secret(&backup, passphrase)
+            .map_err(|_| "Wrong passphrase or corrupt file".to_string())?;
+        Self::from_phrase_bytes(&phrase)?;
+        Ok(phrase)
+    }
+
+    /// From the recovery phrase (UTF-8 bytes); error messages are fixed and never carry the content.
+    pub fn from_phrase_bytes(phrase: &[u8]) -> Result<Account, String> {
+        let phrase = std::str::from_utf8(phrase)
+            .map_err(|_| "The account contents are invalid".to_string())?;
+        let (pair, _) = sr25519::Pair::from_phrase(phrase, None)
+            .map_err(|_| "The recovery phrase is invalid".to_string())?;
+        Ok(Account { pair })
     }
 
     pub fn load(enc_path: &Path, passphrase: &str) -> Result<Account, String> {
@@ -101,7 +117,27 @@ impl Account {
     }
 }
 
-fn check_passphrase(p: &str) -> Result<(), String> {
+fn write_files(enc_path: &Path, phrase: &[u8], passphrase: &str) -> Result<AccountId, String> {
+    let id = Account::from_phrase_bytes(phrase)?.id();
+    let backup = madar_keystore::backup_secret(phrase, passphrase)
+        .map_err(|e| format!("Failed to encrypt the account: {e:?}"))?;
+    let public = format!(
+        "account_id_hex={}\nss58={}\n",
+        hex::encode(id.as_ref() as &[u8]),
+        id.to_ss58check()
+    );
+    madar_keystore::create_key_files(
+        enc_path,
+        &backup.to_bytes(),
+        &pub_path(enc_path),
+        public.as_bytes(),
+        passphrase,
+        phrase,
+    )?;
+    Ok(id)
+}
+
+pub fn check_passphrase(p: &str) -> Result<(), String> {
     if p.chars().count() < MIN_PASSPHRASE {
         return Err(format!(
             "The passphrase is shorter than {MIN_PASSPHRASE} characters — no file was written."
@@ -146,6 +182,15 @@ pub fn parse_address(s: &str) -> Result<AccountId, String> {
 
 /// The passphrase: from a file (`--passphrase-file`, for automation; a single line) or a hidden prompt with no echo (with confirmation on creation).
 pub fn read_passphrase(file: Option<&Path>, confirm: bool) -> Result<Zeroizing<String>, String> {
+    read_secret_line(file, "Account file passphrase: ", confirm)
+}
+
+/// A secret line from a file (or a one-time pipe) or a hidden prompt with no echo (with confirmation if requested).
+pub fn read_secret_line(
+    file: Option<&Path>,
+    prompt: &str,
+    confirm: bool,
+) -> Result<Zeroizing<String>, String> {
     if let Some(f) = file {
         let raw = Zeroizing::new(
             std::fs::read_to_string(f)
@@ -156,7 +201,7 @@ pub fn read_passphrase(file: Option<&Path>, confirm: bool) -> Result<Zeroizing<S
         ));
     }
     let p = Zeroizing::new(
-        rpassword::prompt_password("Account file passphrase: ")
+        rpassword::prompt_password(prompt)
             .map_err(|e| format!("Could not read the passphrase: {e}"))?,
     );
     if confirm {
